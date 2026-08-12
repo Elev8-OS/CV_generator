@@ -1,8 +1,10 @@
 const path = require("path");
 const express = require("express");
+const multer = require("multer");
 
 const { DEFAULT_PROFILE } = require("./lib/profile");
 const { ensureDocuments } = require("./lib/assets");
+const { saveUploadedDocument, resolveDocumentPath, documentStatus } = require("./lib/documents");
 const store = require("./lib/store");
 const { generateApplication } = require("./lib/ai");
 const { fetchJobPostingText } = require("./lib/fetchJob");
@@ -18,6 +20,7 @@ ensureDocuments();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 const PORT = process.env.PORT || 3000;
 
@@ -27,12 +30,16 @@ function getProfile() {
 
 // ---------- Public static assets ----------
 app.use(express.static(path.join(__dirname, "public")));
-app.get("/documents/lehrzeugnis.pdf", (req, res) =>
-  res.sendFile(path.join(__dirname, "assets", "documents", "Lehrzeugnis_R_Nussbaum_AG.pdf"))
-);
-app.get("/documents/efz.pdf", (req, res) =>
-  res.sendFile(path.join(__dirname, "assets", "documents", "Faehigkeitszeugnis_EFZ_Polymechaniker.pdf"))
-);
+app.get("/documents/lehrzeugnis.pdf", (req, res) => {
+  const p = resolveDocumentPath("lehrzeugnis");
+  if (!p) return res.status(404).send("Lehrzeugnis wurde noch nicht hochgeladen. Bitte unter /profile hochladen.");
+  res.sendFile(p);
+});
+app.get("/documents/efz.pdf", (req, res) => {
+  const p = resolveDocumentPath("efz");
+  if (!p) return res.status(404).send("EFZ wurde noch nicht hochgeladen. Bitte unter /profile hochladen.");
+  res.sendFile(p);
+});
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 // ---------- Public: digital application page + generated PDFs ----------
@@ -122,8 +129,21 @@ app.delete("/api/applications/:slug", requireAuth, (req, res) => {
 app.get("/profile", requireAuth, (req, res) => {
   const profile = getProfile();
   res.set("Content-Type", "text/html; charset=utf-8").send(
-    renderProfilePage({ profileJson: JSON.stringify(profile, null, 2) })
+    renderProfilePage({ profileJson: JSON.stringify(profile, null, 2), docs: documentStatus() })
   );
+});
+
+app.post("/api/documents/:key", requireAuth, upload.single("file"), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
+    if (req.file.mimetype !== "application/pdf") {
+      return res.status(400).json({ error: "Bitte eine PDF-Datei hochladen." });
+    }
+    saveUploadedDocument(req.params.key, req.file.buffer);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post("/api/profile", requireAuth, (req, res) => {
