@@ -19,6 +19,7 @@ const { qrDataUri } = require("./lib/qr");
 const { renderIndexPage } = require("./lib/pages/indexPage");
 const { renderAppPage } = require("./lib/pages/appPage");
 const { renderProfilePage } = require("./lib/pages/profilePage");
+const { renderPostingPage } = require("./lib/pages/postingPage");
 
 ensureDocuments();
 
@@ -159,6 +160,12 @@ app.post("/api/generate", requireAuth, async (req, res) => {
     const msg = err.code === "NO_API_KEY" ? err.message : err.message || "Unbekannter Fehler bei der Generierung.";
     res.status(500).json({ error: msg });
   }
+});
+
+app.get("/posting/:slug", requireAuth, (req, res) => {
+  const entry = store.getApplication(req.params.slug);
+  if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderPostingPage({ entry }));
 });
 
 app.delete("/api/applications/:slug", requireAuth, (req, res) => {
