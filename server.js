@@ -16,6 +16,7 @@ const { renderPdfBufferFit } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
 const { qrDataUri } = require("./lib/qr");
+const { buildApplicationEml } = require("./lib/eml");
 const { renderIndexPage } = require("./lib/pages/indexPage");
 const { renderAppPage } = require("./lib/pages/appPage");
 const { renderProfilePage } = require("./lib/pages/profilePage");
@@ -202,6 +203,56 @@ app.patch("/api/applications/:slug/note", requireAuth, (req, res) => {
   const entry = store.updateApplicationNote(req.params.slug, note);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
   res.json({ ok: true, note: entry.note });
+});
+
+// A mailto: link can never carry a real file attachment (hard limitation of
+// the mailto: standard itself). This route builds an actual .eml message —
+// CV and cover letter already embedded as real PDF attachments — so Raffael
+// can download it, open it in his mail app, and just forward/send it on.
+app.get("/api/applications/:slug/eml", requireAuth, async (req, res) => {
+  const entry = store.getApplication(req.params.slug);
+  if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  try {
+    const qr = await buildQr(req, entry.slug);
+    const [cvBuffer, coverBuffer] = await Promise.all([
+      renderPdfBufferFit(
+        (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
+        { maxPages: 1 }
+      ),
+      renderPdfBufferFit(
+        (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
+        { maxPages: 1 }
+      )
+    ]);
+
+    const g = entry.generated;
+    const p = entry.profileSnapshot.personal;
+    const eml = buildApplicationEml({
+      to: (g.contactEmail || "").trim(),
+      subject: g.emailSubject || `Bewerbung als ${g.jobTitle || ""}`,
+      bodyText: g.emailBody || "",
+      fromName: p.name,
+      fromEmail: p.email,
+      attachments: [
+        { filename: `Lebenslauf_${p.name.replace(/\s+/g, "_")}.pdf`, mime: "application/pdf", buffer: cvBuffer },
+        {
+          filename: `Motivationsschreiben_${(g.company || "Bewerbung").replace(/\s+/g, "_")}.pdf`,
+          mime: "application/pdf",
+          buffer: coverBuffer
+        }
+      ]
+    });
+
+    const safeName = `Bewerbung_${(g.company || "Bewerbung").replace(/[^a-zA-Z0-9_-]+/g, "_")}.eml`;
+    res.set({
+      "Content-Type": "message/rfc822",
+      "Content-Disposition": `attachment; filename="${safeName}"`
+    });
+    res.send(eml);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("E-Mail-Datei konnte nicht erstellt werden.");
+  }
 });
 
 app.get("/profile", requireAuth, (req, res) => {

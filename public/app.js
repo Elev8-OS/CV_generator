@@ -76,9 +76,11 @@
       document.getElementById("dlApp").href = `/a/${data.slug}`;
       document.getElementById("appUrl").value = window.location.origin + "/a/" + data.slug;
       document.getElementById("dlMailto").href = buildMailto(data.generated, data.slug);
-      document.getElementById("mailtoHint").textContent = data.generated.contactEmail
-        ? "Wird vorbereitet an: " + data.generated.contactEmail + " — Anhänge sind als Links im Text enthalten (E-Mail-Programme können keine Dateien automatisch anhängen)."
-        : "Im Inserat wurde keine Kontakt-E-Mail gefunden — bitte Empfänger im E-Mail-Programm manuell eintragen. Anhänge sind als Links im Text enthalten.";
+      document.getElementById("dlEml").href = "/api/applications/" + data.slug + "/eml";
+      document.getElementById("mailtoHint").textContent = (data.generated.contactEmail
+        ? "Wird vorbereitet an: " + data.generated.contactEmail + ". "
+        : "Im Inserat wurde keine Kontakt-E-Mail gefunden — bitte Empfänger manuell eintragen. ") +
+        "Direkt öffnen = schnell, aber ohne echten Anhang (nur Links im Text). Herunterladen = mit Lebenslauf + Motivationsschreiben als echtem PDF-Anhang, danach im Mail-Programm öffnen und weiterleiten/senden.";
 
       result.style.display = "block";
       genStatus.textContent = "Fertig! Unten findest du alle Texte, Downloads und die digitale Bewerbungsseite.";
