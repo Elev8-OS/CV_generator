@@ -16,7 +16,8 @@
     "cheerio": "^1.0.0",
     "express": "^4.21.1",
     "multer": "^2.2.0",
-    "pdfmake": "^0.2.15"
+    "pdfmake": "^0.2.15",
+    "qrcode": "^1.5.4"
   },
   "license": "ISC"
 }
