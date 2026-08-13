@@ -115,6 +115,45 @@
     });
   });
 
+  // ---- Gespeicherte Suchen (Jobsuche-Schnellzugriff) ----
+  const addSearchForm = document.getElementById("addSearchForm");
+  if (addSearchForm) {
+    addSearchForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const label = document.getElementById("searchLabel").value.trim();
+      const url = document.getElementById("searchUrl").value.trim();
+      const searchStatus = document.getElementById("searchStatus");
+      if (!label || !url) return;
+      try {
+        const res = await fetch("/api/searches", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label, url })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+        window.location.reload();
+      } catch (err) {
+        searchStatus.textContent = "Fehler: " + err.message;
+        searchStatus.className = "status err";
+      }
+    });
+  }
+
+  document.querySelectorAll("[data-delete-search]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Diese gespeicherte Suche entfernen?")) return;
+      const id = btn.dataset.deleteSearch;
+      try {
+        const res = await fetch(`/api/searches/${id}`, { method: "DELETE" });
+        if (!res.ok) throw new Error();
+        btn.closest(".search-chip").remove();
+      } catch {
+        alert("Suche konnte nicht entfernt werden.");
+      }
+    });
+  });
+
   // ---- Öffentliche Seite deaktivieren/aktivieren (Datenschutz) ----
   document.querySelectorAll("[data-toggle-public]").forEach((btn) => {
     btn.addEventListener("click", async () => {

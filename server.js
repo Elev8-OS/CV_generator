@@ -150,7 +150,8 @@ app.get("/", requireAuth, (req, res) => {
       applications,
       hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
       statuses: STATUSES,
-      baseUrl: baseUrlFor(req)
+      baseUrl: baseUrlFor(req),
+      savedSearches: store.listSearches()
     })
   );
 });
@@ -354,6 +355,31 @@ app.post("/api/profile", requireAuth, (req, res) => {
 app.post("/api/profile/reset", requireAuth, (req, res) => {
   store.saveProfile(DEFAULT_PROFILE);
   res.json({ ok: true });
+});
+
+// Gespeicherte Job-Suchen: kein automatisches Scraping/RSS (siehe lib/store.js
+// für die Begründung), nur Raffaels eigene Suchlinks als Ein-Klick-Schnellzugriff.
+app.post("/api/searches", requireAuth, (req, res) => {
+  const { label, url } = req.body || {};
+  if (!label || !String(label).trim()) {
+    return res.status(400).json({ error: "Bitte einen Namen für die Suche angeben." });
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return res.status(400).json({ error: "Ungültiger Link." });
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return res.status(400).json({ error: "Nur http(s)-Links sind erlaubt." });
+  }
+  const entry = store.addSearch({ label: String(label).trim(), url: parsed.toString() });
+  res.json({ ok: true, entry });
+});
+
+app.delete("/api/searches/:id", requireAuth, (req, res) => {
+  const ok = store.deleteSearch(req.params.id);
+  res.json({ ok });
 });
 
 app.listen(PORT, () => {
