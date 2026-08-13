@@ -5,11 +5,12 @@ const multer = require("multer");
 const { DEFAULT_PROFILE } = require("./lib/profile");
 const { ensureDocuments } = require("./lib/assets");
 const { saveUploadedDocument, resolveDocumentPath, documentStatus } = require("./lib/documents");
+const { saveMedia, resolveMedia, mediaStatus } = require("./lib/media");
 const store = require("./lib/store");
 const { generateApplication } = require("./lib/ai");
 const { fetchJobPostingText } = require("./lib/fetchJob");
 const { requireAuth } = require("./lib/auth");
-const { renderPdfBuffer } = require("./lib/pdf/printer");
+const { renderPdfBuffer, renderPdfBufferFit } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
 const { renderIndexPage } = require("./lib/pages/indexPage");
@@ -39,6 +40,11 @@ app.get("/documents/efz.pdf", (req, res) => {
   const p = resolveDocumentPath("efz");
   if (!p) return res.status(404).send("EFZ wurde noch nicht hochgeladen. Bitte unter /profile hochladen.");
   res.sendFile(p);
+});
+app.get("/media/:key", (req, res) => {
+  const m = resolveMedia(req.params.key);
+  if (!m) return res.status(404).send("Nicht gefunden.");
+  res.set("Content-Type", m.mime).sendFile(m.path);
 });
 app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -70,7 +76,10 @@ app.get("/pdf/:slug/cover", async (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   try {
-    const buffer = await renderPdfBuffer(buildCoverDocDefinition(entry.profileSnapshot, entry.generated));
+    const buffer = await renderPdfBufferFit(
+      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, {}, level),
+      { maxPages: 1 }
+    );
     res.set({
       "Content-Type": "application/pdf",
       "Content-Disposition": `inline; filename="Motivationsschreiben_${(entry.generated.company || "Bewerbung").replace(/\s+/g, "_")}.pdf"`
@@ -129,7 +138,7 @@ app.delete("/api/applications/:slug", requireAuth, (req, res) => {
 app.get("/profile", requireAuth, (req, res) => {
   const profile = getProfile();
   res.set("Content-Type", "text/html; charset=utf-8").send(
-    renderProfilePage({ profileJson: JSON.stringify(profile, null, 2), docs: documentStatus() })
+    renderProfilePage({ profileJson: JSON.stringify(profile, null, 2), docs: documentStatus(), media: mediaStatus() })
   );
 });
 
@@ -140,6 +149,16 @@ app.post("/api/documents/:key", requireAuth, upload.single("file"), (req, res) =
       return res.status(400).json({ error: "Bitte eine PDF-Datei hochladen." });
     }
     saveUploadedDocument(req.params.key, req.file.buffer);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/media/:key", requireAuth, upload.single("file"), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
+    saveMedia(req.params.key, req.file.buffer, req.file.mimetype);
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
