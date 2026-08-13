@@ -13,6 +13,7 @@ const { requireAuth } = require("./lib/auth");
 const { renderPdfBuffer, renderPdfBufferFit } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
+const { qrDataUri } = require("./lib/qr");
 const { renderIndexPage } = require("./lib/pages/indexPage");
 const { renderAppPage } = require("./lib/pages/appPage");
 const { renderProfilePage } = require("./lib/pages/profilePage");
@@ -48,6 +49,22 @@ app.get("/media/:key", (req, res) => {
 });
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// Railway always terminates TLS at the edge, so the public URL is always
+// https even though the app itself just sees a plain HTTP request.
+function digitalUrl(req, slug) {
+  return `https://${req.get("host")}/a/${slug}`;
+}
+
+async function buildQr(req, slug) {
+  const url = digitalUrl(req, slug);
+  try {
+    return { url, dataUri: await qrDataUri(url) };
+  } catch (err) {
+    console.error("QR-Code konnte nicht erstellt werden:", err);
+    return null;
+  }
+}
+
 // ---------- Public: digital application page + generated PDFs ----------
 app.get("/a/:slug", (req, res) => {
   const entry = store.getApplication(req.params.slug);
@@ -60,7 +77,8 @@ app.get("/pdf/:slug/cv", async (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   try {
-    const buffer = await renderPdfBuffer(buildCvDocDefinition(entry.profileSnapshot, entry.generated));
+    const qr = await buildQr(req, entry.slug);
+    const buffer = await renderPdfBuffer(buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr }));
     res.set({
       "Content-Type": "application/pdf",
       "Content-Disposition": `inline; filename="CV_${entry.profileSnapshot.personal.name.replace(/\s+/g, "_")}.pdf"`
@@ -76,8 +94,9 @@ app.get("/pdf/:slug/cover", async (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   try {
+    const qr = await buildQr(req, entry.slug);
     const buffer = await renderPdfBufferFit(
-      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, {}, level),
+      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
       { maxPages: 1 }
     );
     res.set({
