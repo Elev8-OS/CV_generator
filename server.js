@@ -59,8 +59,12 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 
 // Railway always terminates TLS at the edge, so the public URL is always
 // https even though the app itself just sees a plain HTTP request.
+function baseUrlFor(req) {
+  return `https://${req.get("host")}`;
+}
+
 function digitalUrl(req, slug) {
-  return `https://${req.get("host")}/a/${slug}`;
+  return `${baseUrlFor(req)}/a/${slug}`;
 }
 
 async function buildQr(req, slug) {
@@ -78,7 +82,13 @@ app.get("/a/:slug", (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   const libraryDocs = documentLibrary.listLibraryDocuments();
-  const html = renderAppPage({ profile: entry.profileSnapshot, generated: entry.generated, entry, libraryDocs });
+  const html = renderAppPage({
+    profile: entry.profileSnapshot,
+    generated: entry.generated,
+    entry,
+    libraryDocs,
+    baseUrl: baseUrlFor(req)
+  });
   res.set("Content-Type", "text/html; charset=utf-8").send(html);
 });
 
@@ -126,7 +136,12 @@ app.get("/pdf/:slug/cover", async (req, res) => {
 app.get("/", requireAuth, (req, res) => {
   const applications = store.listApplications();
   res.set("Content-Type", "text/html; charset=utf-8").send(
-    renderIndexPage({ applications, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY), statuses: STATUSES })
+    renderIndexPage({
+      applications,
+      hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
+      statuses: STATUSES,
+      baseUrl: baseUrlFor(req)
+    })
   );
 });
 

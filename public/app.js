@@ -1,4 +1,21 @@
 (function () {
+  // Mirrors lib/mailto.js's buildApplicationMailto server-side logic, for the
+  // freshly-generated result panel (no page reload needed to get the link).
+  function buildMailto(generated, slug) {
+    const g = generated || {};
+    const to = String(g.contactEmail || "").trim();
+    const subject = g.emailSubject || "Bewerbung als " + (g.jobTitle || "");
+    const base = window.location.origin;
+    const links = [
+      "Lebenslauf (PDF): " + base + "/pdf/" + slug + "/cv",
+      "Motivationsschreiben (PDF): " + base + "/pdf/" + slug + "/cover",
+      "Digitale Bewerbungsseite: " + base + "/a/" + slug
+    ];
+    const body = (g.emailBody || "") + "\n\n---\nUnterlagen zum Download:\n" + links.join("\n");
+    const qs = "subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
+    return "mailto:" + to + "?" + qs;
+  }
+
   const tabBtns = document.querySelectorAll(".tab-btn");
   const fieldText = document.getElementById("field-text");
   const fieldUrl = document.getElementById("field-url");
@@ -58,6 +75,10 @@
       document.getElementById("dlCover").href = `/pdf/${data.slug}/cover`;
       document.getElementById("dlApp").href = `/a/${data.slug}`;
       document.getElementById("appUrl").value = window.location.origin + "/a/" + data.slug;
+      document.getElementById("dlMailto").href = buildMailto(data.generated, data.slug);
+      document.getElementById("mailtoHint").textContent = data.generated.contactEmail
+        ? "Wird vorbereitet an: " + data.generated.contactEmail + " — Anhänge sind als Links im Text enthalten (E-Mail-Programme können keine Dateien automatisch anhängen)."
+        : "Im Inserat wurde keine Kontakt-E-Mail gefunden — bitte Empfänger im E-Mail-Programm manuell eintragen. Anhänge sind als Links im Text enthalten.";
 
       result.style.display = "block";
       genStatus.textContent = "Fertig! Unten findest du alle Texte, Downloads und die digitale Bewerbungsseite.";
