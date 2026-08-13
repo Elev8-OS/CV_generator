@@ -19,6 +19,7 @@ const { qrDataUri } = require("./lib/qr");
 const { buildApplicationEml } = require("./lib/eml");
 const { renderIndexPage } = require("./lib/pages/indexPage");
 const { renderAppPage } = require("./lib/pages/appPage");
+const { renderDeactivatedPage } = require("./lib/pages/deactivatedPage");
 const { renderProfilePage } = require("./lib/pages/profilePage");
 const { renderPostingPage } = require("./lib/pages/postingPage");
 
@@ -82,6 +83,9 @@ async function buildQr(req, slug) {
 app.get("/a/:slug", (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  if (entry.publicDisabled) {
+    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
+  }
   const libraryDocs = documentLibrary.listLibraryDocuments();
   const html = renderAppPage({
     profile: entry.profileSnapshot,
@@ -95,6 +99,9 @@ app.get("/a/:slug", (req, res) => {
 app.get("/pdf/:slug/cv", async (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  if (entry.publicDisabled) {
+    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
+  }
   try {
     const qr = await buildQr(req, entry.slug);
     const buffer = await renderPdfBufferFit(
@@ -115,6 +122,9 @@ app.get("/pdf/:slug/cv", async (req, res) => {
 app.get("/pdf/:slug/cover", async (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  if (entry.publicDisabled) {
+    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
+  }
   try {
     const qr = await buildQr(req, entry.slug);
     const buffer = await renderPdfBufferFit(
@@ -203,6 +213,17 @@ app.patch("/api/applications/:slug/note", requireAuth, (req, res) => {
   const entry = store.updateApplicationNote(req.params.slug, note);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
   res.json({ ok: true, note: entry.note });
+});
+
+// Manually take the public digital application page + PDF downloads offline
+// (e.g. once a process is finished) without deleting the application itself —
+// the private dashboard entry, its status/note history and the .eml download
+// stay available to Raffael regardless.
+app.patch("/api/applications/:slug/public", requireAuth, (req, res) => {
+  const { disabled } = req.body || {};
+  const entry = store.setPublicDisabled(req.params.slug, disabled);
+  if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
+  res.json({ ok: true, publicDisabled: entry.publicDisabled });
 });
 
 // A mailto: link can never carry a real file attachment (hard limitation of

@@ -115,6 +115,29 @@
     });
   });
 
+  // ---- Öffentliche Seite deaktivieren/aktivieren (Datenschutz) ----
+  document.querySelectorAll("[data-toggle-public]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const slug = btn.dataset.togglePublic;
+      const currentlyDisabled = btn.dataset.publicDisabled === "1";
+      const nextDisabled = !currentlyDisabled;
+      if (nextDisabled && !confirm("Öffentliche Bewerbungsseite und PDF-Downloads für diese Bewerbung offline nehmen? Ein bereits versendeter Link zeigt danach nur noch 'nicht mehr verfügbar'. Im Dashboard bleibt alles erhalten.")) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/applications/${slug}/public`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ disabled: nextDisabled })
+        });
+        if (!res.ok) throw new Error();
+        window.location.reload();
+      } catch {
+        alert("Konnte den Status der öffentlichen Seite nicht ändern.");
+      }
+    });
+  });
+
   // ---- Status-Dropdown pro Bewerbung ----
   document.querySelectorAll("[data-status-select]").forEach((sel) => {
     sel.addEventListener("change", async () => {
