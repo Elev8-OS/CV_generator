@@ -6,6 +6,7 @@ const { DEFAULT_PROFILE } = require("./lib/profile");
 const { ensureDocuments } = require("./lib/assets");
 const { saveUploadedDocument, resolveDocumentPath, documentStatus } = require("./lib/documents");
 const { saveMedia, resolveMedia, mediaStatus } = require("./lib/media");
+const documentLibrary = require("./lib/documentLibrary");
 const store = require("./lib/store");
 const { generateApplication } = require("./lib/ai");
 const { STATUSES, isValidStatus } = require("./lib/statuses");
@@ -48,6 +49,11 @@ app.get("/media/:key", (req, res) => {
   if (!m) return res.status(404).send("Nicht gefunden.");
   res.set("Content-Type", m.mime).sendFile(m.path);
 });
+app.get("/documents/library/:id", (req, res) => {
+  const file = documentLibrary.resolveLibraryFile(req.params.id);
+  if (!file) return res.status(404).send("Dokument nicht gefunden.");
+  res.set("Content-Type", file.mime).sendFile(file.path);
+});
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 // Railway always terminates TLS at the edge, so the public URL is always
@@ -70,7 +76,8 @@ async function buildQr(req, slug) {
 app.get("/a/:slug", (req, res) => {
   const entry = store.getApplication(req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
-  const html = renderAppPage({ profile: entry.profileSnapshot, generated: entry.generated, entry });
+  const libraryDocs = documentLibrary.listLibraryDocuments();
+  const html = renderAppPage({ profile: entry.profileSnapshot, generated: entry.generated, entry, libraryDocs });
   res.set("Content-Type", "text/html; charset=utf-8").send(html);
 });
 
@@ -134,7 +141,8 @@ app.post("/api/generate", requireAuth, async (req, res) => {
     }
 
     const profile = getProfile();
-    const generated = await generateApplication({ profile, jobPostingText: text, jobUrl });
+    const libraryDocs = documentLibrary.listLibraryDocuments();
+    const generated = await generateApplication({ profile, jobPostingText: text, jobUrl, libraryDocs });
 
     const entry = store.createApplication({
       jobTitle: generated.jobTitle,
@@ -178,8 +186,44 @@ app.patch("/api/applications/:slug/note", requireAuth, (req, res) => {
 app.get("/profile", requireAuth, (req, res) => {
   const profile = getProfile();
   res.set("Content-Type", "text/html; charset=utf-8").send(
-    renderProfilePage({ profileJson: JSON.stringify(profile, null, 2), docs: documentStatus(), media: mediaStatus() })
+    renderProfilePage({
+      profileJson: JSON.stringify(profile, null, 2),
+      docs: documentStatus(),
+      media: mediaStatus(),
+      libraryDocs: documentLibrary.listLibraryDocuments(),
+      libraryCategories: documentLibrary.CATEGORIES
+    })
   );
+});
+
+// NOTE: these two /api/documents/library routes must be registered BEFORE
+// the generic /api/documents/:key route below — otherwise Express matches
+// "library" as :key first and the library upload/list never gets reached.
+app.get("/api/documents/library", requireAuth, (req, res) => {
+  res.json({ documents: documentLibrary.listLibraryDocuments(), categories: documentLibrary.CATEGORIES });
+});
+
+app.post("/api/documents/library", requireAuth, upload.single("file"), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
+    const { category, title, skillsText } = req.body || {};
+    const entry = documentLibrary.addLibraryDocument({
+      buffer: req.file.buffer,
+      mimetype: req.file.mimetype,
+      originalName: req.file.originalname,
+      category,
+      title,
+      skillsText
+    });
+    res.json({ ok: true, document: entry });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete("/api/documents/library/:id", requireAuth, (req, res) => {
+  const ok = documentLibrary.deleteLibraryDocument(req.params.id);
+  res.json({ ok });
 });
 
 app.post("/api/documents/:key", requireAuth, upload.single("file"), (req, res) => {
