@@ -8,9 +8,10 @@ const { saveUploadedDocument, resolveDocumentPath, documentStatus } = require(".
 const { saveMedia, resolveMedia, mediaStatus } = require("./lib/media");
 const store = require("./lib/store");
 const { generateApplication } = require("./lib/ai");
+const { STATUSES, isValidStatus } = require("./lib/statuses");
 const { fetchJobPostingText } = require("./lib/fetchJob");
 const { requireAuth } = require("./lib/auth");
-const { renderPdfBuffer, renderPdfBufferFit } = require("./lib/pdf/printer");
+const { renderPdfBufferFit } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
 const { qrDataUri } = require("./lib/qr");
@@ -78,7 +79,10 @@ app.get("/pdf/:slug/cv", async (req, res) => {
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   try {
     const qr = await buildQr(req, entry.slug);
-    const buffer = await renderPdfBuffer(buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr }));
+    const buffer = await renderPdfBufferFit(
+      (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
+      { maxPages: 1 }
+    );
     res.set({
       "Content-Type": "application/pdf",
       "Content-Disposition": `inline; filename="CV_${entry.profileSnapshot.personal.name.replace(/\s+/g, "_")}.pdf"`
@@ -114,7 +118,7 @@ app.get("/pdf/:slug/cover", async (req, res) => {
 app.get("/", requireAuth, (req, res) => {
   const applications = store.listApplications();
   res.set("Content-Type", "text/html; charset=utf-8").send(
-    renderIndexPage({ applications, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY) })
+    renderIndexPage({ applications, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY), statuses: STATUSES })
   );
 });
 
@@ -152,6 +156,23 @@ app.post("/api/generate", requireAuth, async (req, res) => {
 app.delete("/api/applications/:slug", requireAuth, (req, res) => {
   const ok = store.deleteApplication(req.params.slug);
   res.json({ ok });
+});
+
+app.patch("/api/applications/:slug/status", requireAuth, (req, res) => {
+  const { status } = req.body || {};
+  if (!isValidStatus(status)) {
+    return res.status(400).json({ error: "Ungültiger Status." });
+  }
+  const entry = store.updateApplicationStatus(req.params.slug, status);
+  if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
+  res.json({ ok: true, status: entry.status, statusUpdatedAt: entry.statusUpdatedAt });
+});
+
+app.patch("/api/applications/:slug/note", requireAuth, (req, res) => {
+  const { note } = req.body || {};
+  const entry = store.updateApplicationNote(req.params.slug, note);
+  if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
+  res.json({ ok: true, note: entry.note });
 });
 
 app.get("/profile", requireAuth, (req, res) => {

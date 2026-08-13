@@ -91,4 +91,63 @@
       if (res.ok) btn.closest("tr").remove();
     });
   });
+
+  // ---- Status-Dropdown pro Bewerbung ----
+  document.querySelectorAll("[data-status-select]").forEach((sel) => {
+    sel.addEventListener("change", async () => {
+      const slug = sel.dataset.statusSelect;
+      const dot = sel.closest(".status-select-wrap").querySelector(".status-dot");
+      const prevColor = dot.style.background;
+      try {
+        const res = await fetch(`/api/applications/${slug}/status`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: sel.value })
+        });
+        if (!res.ok) throw new Error();
+        const opt = sel.options[sel.selectedIndex];
+        dot.style.background = opt.dataset.color || prevColor;
+        sel.closest("tr").dataset.status = sel.value;
+      } catch {
+        alert("Status konnte nicht gespeichert werden.");
+      }
+    });
+  });
+
+  // ---- Notiz pro Bewerbung (speichert beim Verlassen des Felds) ----
+  document.querySelectorAll("[data-note-input]").forEach((input) => {
+    let lastSaved = input.value;
+    input.addEventListener("blur", async () => {
+      if (input.value === lastSaved) return;
+      const slug = input.dataset.noteInput;
+      try {
+        const res = await fetch(`/api/applications/${slug}/note`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ note: input.value })
+        });
+        if (!res.ok) throw new Error();
+        lastSaved = input.value;
+      } catch {
+        alert("Notiz konnte nicht gespeichert werden.");
+      }
+    });
+  });
+
+  // ---- Status-Filter ----
+  const statusFilter = document.getElementById("statusFilter");
+  if (statusFilter) {
+    statusFilter.addEventListener("change", () => {
+      const wanted = statusFilter.value;
+      const rows = document.querySelectorAll("#appTableBody tr[data-row]");
+      let visibleCount = 0;
+      rows.forEach((tr) => {
+        const match = !wanted || tr.dataset.status === wanted;
+        tr.toggleAttribute("data-hidden", !match);
+        if (match) visibleCount++;
+      });
+      const emptyMsg = document.getElementById("filterEmpty");
+      if (emptyMsg) emptyMsg.style.display = rows.length && !visibleCount ? "block" : "none";
+    });
+  }
 })();
