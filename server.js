@@ -86,8 +86,7 @@ app.get("/a/:slug", (req, res) => {
     profile: entry.profileSnapshot,
     generated: entry.generated,
     entry,
-    libraryDocs,
-    baseUrl: baseUrlFor(req)
+    libraryDocs
   });
   res.set("Content-Type", "text/html; charset=utf-8").send(html);
 });
