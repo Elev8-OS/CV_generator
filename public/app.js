@@ -66,6 +66,15 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Unbekannter Fehler");
 
+      if (data.duplicateWarning) {
+        const w = data.duplicateWarning;
+        const dateStr = new Date(w.createdAt).toLocaleDateString("de-CH");
+        alert(
+          "⚠️ Achtung: Du hast dich bei dieser Firma bereits am " + dateStr + " beworben (Status: " +
+          (w.statusLabel || w.status) + "). Diese neue Bewerbung wurde trotzdem gespeichert — bitte unten in der Liste prüfen und ggf. eine der beiden löschen."
+        );
+      }
+
       document.getElementById("emailText").value =
         (data.generated.emailSubject ? "Betreff: " + data.generated.emailSubject + "\n\n" : "") +
         data.generated.emailBody +
@@ -150,6 +159,36 @@
         btn.closest(".search-chip").remove();
       } catch {
         alert("Suche konnte nicht entfernt werden.");
+      }
+    });
+  });
+
+  // ---- Nachfassen: Mail öffnen + Status im Hintergrund auf "Follow-up gemacht" setzen ----
+  // Kein preventDefault: der mailto:-Link soll ganz normal das Mail-Programm
+  // öffnen (das entlädt die Seite nicht), der Status-PATCH läuft parallel dazu.
+  document.querySelectorAll("[data-followup]").forEach((link) => {
+    link.addEventListener("click", async () => {
+      const slug = link.dataset.followup;
+      try {
+        const res = await fetch(`/api/applications/${slug}/status`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "follow_up" })
+        });
+        if (!res.ok) return;
+        const tr = document.querySelector(`tr[data-row="${slug}"]`);
+        if (!tr) return;
+        const sel = tr.querySelector("[data-status-select]");
+        const dot = tr.querySelector(".status-dot");
+        if (sel) {
+          sel.value = "follow_up";
+          const opt = sel.options[sel.selectedIndex];
+          if (dot && opt) dot.style.background = opt.dataset.color || dot.style.background;
+        }
+        tr.dataset.status = "follow_up";
+      } catch {
+        // Stiller Fehlschlag: Die Mail wurde trotzdem geöffnet, der
+        // Status-Update ist nur ein Komfort-Extra.
       }
     });
   });

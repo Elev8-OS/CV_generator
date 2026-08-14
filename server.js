@@ -11,6 +11,7 @@ const store = require("./lib/store");
 const { generateApplication } = require("./lib/ai");
 const { STATUSES, isValidStatus } = require("./lib/statuses");
 const { fetchJobPostingText } = require("./lib/fetchJob");
+const { findDuplicateApplication } = require("./lib/dedupe");
 const { requireAuth } = require("./lib/auth");
 const { renderPdfBufferFit } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
@@ -171,16 +172,36 @@ app.post("/api/generate", requireAuth, async (req, res) => {
     const libraryDocs = documentLibrary.listLibraryDocuments();
     const generated = await generateApplication({ profile, jobPostingText: text, jobUrl, libraryDocs });
 
+    // Dublettenprüfung: die KI kann Firmennamen leicht unterschiedlich
+    // schreiben (z.B. "Muster AG" vs. "Muster") — findDuplicateApplication
+    // vergleicht deshalb normalisiert statt exakt. Eine gefundene Dublette
+    // verhindert das Speichern NICHT (Raffael könnte bewusst erneut bei
+    // derselben Firma auf eine andere Stelle antworten), sondern wird nur
+    // sichtbar markiert, damit er es bewusst prüfen kann.
+    const duplicate = findDuplicateApplication(store.listApplications(), generated.company);
+
     const entry = store.createApplication({
       jobTitle: generated.jobTitle,
       company: generated.company,
       jobUrl: jobUrl || null,
       jobPostingRaw: text.slice(0, 8000),
       generated,
-      profileSnapshot: profile
+      profileSnapshot: profile,
+      duplicateOfSlug: duplicate ? duplicate.slug : null
     });
 
-    res.json({ slug: entry.slug, generated });
+    res.json({
+      slug: entry.slug,
+      generated,
+      duplicateWarning: duplicate
+        ? {
+            slug: duplicate.slug,
+            status: duplicate.status,
+            statusLabel: (STATUSES.find((s) => s.key === duplicate.status) || {}).label,
+            createdAt: duplicate.createdAt
+          }
+        : null
+    });
   } catch (err) {
     console.error(err);
     const msg = err.code === "NO_API_KEY" ? err.message : err.message || "Unbekannter Fehler bei der Generierung.";
