@@ -13,9 +13,11 @@ const { STATUSES, isValidStatus } = require("./lib/statuses");
 const { fetchJobPostingText } = require("./lib/fetchJob");
 const { findDuplicateApplication } = require("./lib/dedupe");
 const { requireAuth } = require("./lib/auth");
-const { renderPdfBufferFit } = require("./lib/pdf/printer");
+const { renderPdfBufferFit, renderPdfBuffer } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
+const { buildInsightsDocDefinition } = require("./lib/pdf/insights");
+const { generateCompanyInsights } = require("./lib/companyInsights");
 const { qrDataUri } = require("./lib/qr");
 const { buildApplicationEml } = require("./lib/eml");
 const { renderIndexPage } = require("./lib/pages/indexPage");
@@ -246,6 +248,50 @@ app.patch("/api/applications/:slug/public", requireAuth, (req, res) => {
   const entry = store.setPublicDisabled(req.params.slug, disabled);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
   res.json({ ok: true, publicDisabled: entry.publicDisabled });
+});
+
+// Interview-Vorbereitung: recherchiert die Firma live im Web (siehe
+// lib/companyInsights.js — bewusst KEIN reines KI-Gedächtnis, gerade kleinere
+// Firmen kennt das Modell sonst schlecht oder gar nicht) und cached das
+// Ergebnis auf der Bewerbung. Bewusst requireAuth + kein Link von /a/:slug
+// aus: das ist Raffaels private Gesprächsvorbereitung, nicht Teil der
+// Bewerbung, die die Firma sieht.
+app.post("/api/applications/:slug/company-insights", requireAuth, async (req, res) => {
+  const entry = store.getApplication(req.params.slug);
+  if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
+  try {
+    const insights = await generateCompanyInsights({
+      company: (entry.generated && entry.generated.company) || entry.company,
+      jobTitle: (entry.generated && entry.generated.jobTitle) || entry.jobTitle,
+      jobPostingText: entry.jobPostingRaw
+    });
+    const updated = store.saveCompanyInsights(entry.slug, insights);
+    res.json({ ok: true, generatedAt: updated.companyInsights.generatedAt });
+  } catch (err) {
+    console.error(err);
+    const msg = err.code === "NO_API_KEY" ? err.message : err.message || "Firmen-Insights konnten nicht erstellt werden.";
+    res.status(500).json({ error: msg });
+  }
+});
+
+app.get("/pdf/:slug/insights", requireAuth, async (req, res) => {
+  const entry = store.getApplication(req.params.slug);
+  if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  if (!entry.companyInsights) {
+    return res.status(404).send("Noch nicht erstellt — bitte zuerst im Dashboard über den Button 'Firmen-Insights erstellen' generieren.");
+  }
+  try {
+    const buffer = await renderPdfBuffer(buildInsightsDocDefinition(entry));
+    const companyName = (entry.generated && entry.generated.company) || entry.company || "Firma";
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="Firmen-Insights_${companyName.replace(/\s+/g, "_")}.pdf"`
+    });
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("PDF konnte nicht erstellt werden.");
+  }
 });
 
 // A mailto: link can never carry a real file attachment (hard limitation of

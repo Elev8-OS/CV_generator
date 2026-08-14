@@ -193,6 +193,30 @@
     });
   });
 
+  // ---- Firmen-Insights: Live-Websuche + PDF-Briefing zur Gesprächsvorbereitung ----
+  // Dauert ca. 15-20s (Websuche + KI-Aufbereitung), daher sichtbares
+  // Zwischen-Feedback im Button-Text statt einer stillen Wartezeit.
+  document.querySelectorAll("[data-gen-insights], [data-regen-insights]").forEach((link) => {
+    link.addEventListener("click", async (e) => {
+      e.preventDefault();
+      const slug = link.dataset.genInsights || link.dataset.regenInsights;
+      const original = link.textContent;
+      link.textContent = "🔎 Recherchiere … (ca. 15–20s)";
+      link.style.pointerEvents = "none";
+      try {
+        const res = await fetch(`/api/applications/${slug}/company-insights`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+        window.open(`/pdf/${slug}/insights`, "_blank");
+        window.location.reload();
+      } catch (err) {
+        alert("Firmen-Insights konnten nicht erstellt werden: " + err.message);
+        link.textContent = original;
+        link.style.pointerEvents = "";
+      }
+    });
+  });
+
   // ---- Öffentliche Seite deaktivieren/aktivieren (Datenschutz) ----
   document.querySelectorAll("[data-toggle-public]").forEach((btn) => {
     btn.addEventListener("click", async () => {
