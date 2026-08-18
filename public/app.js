@@ -1,17 +1,27 @@
 (function () {
+  // Server-injected translations (see lib/pages/indexPage.js) — APP_I18N is
+  // the dashboard's own UI language, MAIL_I18N carries all three languages
+  // fully so the "just generated" result panel below can render its mailto
+  // boilerplate in THAT application's language (data.generated.language),
+  // independent of the dashboard's own UI language.
+  const I18N = window.APP_I18N || {};
+  const MAIL_I18N = window.MAIL_I18N || {};
+  const APP_LANG = window.APP_LANG || "de";
+
   // Mirrors lib/mailto.js's buildApplicationMailto server-side logic, for the
   // freshly-generated result panel (no page reload needed to get the link).
   function buildMailto(generated, slug) {
     const g = generated || {};
+    const mi = MAIL_I18N[g.language] || MAIL_I18N[APP_LANG] || {};
     const to = String(g.contactEmail || "").trim();
-    const subject = g.emailSubject || "Bewerbung als " + (g.jobTitle || "");
+    const subject = g.emailSubject || (mi.defaultSubject || "%JOB_TITLE%").replace("%JOB_TITLE%", g.jobTitle || "");
     const base = window.location.origin;
     const links = [
-      "Lebenslauf (PDF): " + base + "/pdf/" + slug + "/cv",
-      "Motivationsschreiben (PDF): " + base + "/pdf/" + slug + "/cover",
-      "Digitale Bewerbungsseite: " + base + "/a/" + slug
+      (mi.cvLine || "%URL_CV%").replace("%URL_CV%", base + "/pdf/" + slug + "/cv"),
+      (mi.coverLine || "%URL_COVER%").replace("%URL_COVER%", base + "/pdf/" + slug + "/cover"),
+      (mi.appPageLine || "%URL_APP%").replace("%URL_APP%", base + "/a/" + slug)
     ];
-    const body = (g.emailBody || "") + "\n\n---\nUnterlagen zum Download:\n" + links.join("\n");
+    const body = (g.emailBody || "") + "\n\n---\n" + (mi.downloadsHeader || "") + "\n" + links.join("\n");
     const qs = "subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
     return "mailto:" + to + "?" + qs;
   }
@@ -45,25 +55,28 @@
   const genStatus = document.getElementById("genStatus");
   const result = document.getElementById("result");
 
+  const jobLangSelect = document.getElementById("jobLang");
+
   generateBtn.addEventListener("click", async () => {
     const jobText = document.getElementById("jobText").value.trim();
     const jobUrl = document.getElementById("jobUrl").value.trim();
     const activeTab = document.querySelector(".tab-btn.active").dataset.tab;
+    const language = (jobLangSelect && jobLangSelect.value) || APP_LANG;
 
     if (activeTab === "text" && !jobText) {
-      genStatus.textContent = "Bitte zuerst den Stelleninserat-Text einfügen.";
+      genStatus.textContent = I18N.errorNeedText || "Bitte zuerst den Stelleninserat-Text einfügen.";
       genStatus.className = "status err";
       return;
     }
     if (activeTab === "url" && !jobUrl) {
-      genStatus.textContent = "Bitte zuerst einen Link einfügen.";
+      genStatus.textContent = I18N.errorNeedUrl || "Bitte zuerst einen Link einfügen.";
       genStatus.className = "status err";
       return;
     }
 
     generateBtn.disabled = true;
     spinner.classList.add("on");
-    genStatus.textContent = "Generiere massgeschneiderte Bewerbung … (kann 15–30 Sekunden dauern)";
+    genStatus.textContent = I18N.generating || "Generiere massgeschneiderte Bewerbung … (kann 15–30 Sekunden dauern)";
     genStatus.className = "status";
     result.style.display = "none";
 
@@ -71,24 +84,23 @@
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(activeTab === "url" ? { jobUrl } : { jobText })
+        body: JSON.stringify(Object.assign(activeTab === "url" ? { jobUrl } : { jobText }, { language }))
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+      if (!res.ok) throw new Error(data.error || I18N.errorGeneric || "Unbekannter Fehler");
 
       if (data.duplicateWarning) {
         const w = data.duplicateWarning;
-        const dateStr = new Date(w.createdAt).toLocaleDateString("de-CH");
-        alert(
-          "⚠️ Achtung: Du hast dich bei dieser Firma bereits am " + dateStr + " beworben (Status: " +
-          (w.statusLabel || w.status) + "). Diese neue Bewerbung wurde trotzdem gespeichert — bitte unten in der Liste prüfen und ggf. eine der beiden löschen."
-        );
+        const dateStr = new Date(w.createdAt).toLocaleDateString();
+        const tmpl = I18N.duplicateWarningTemplate || "⚠️ %DATE% / %STATUS%";
+        alert(tmpl.replace("%DATE%", dateStr).replace("%STATUS%", w.statusLabel || w.status));
       }
 
+      const mi = MAIL_I18N[data.generated.language] || MAIL_I18N[APP_LANG] || {};
       document.getElementById("emailText").value =
         (data.generated.emailSubject ? "Betreff: " + data.generated.emailSubject + "\n\n" : "") +
         data.generated.emailBody +
-        "\n\nBeilagen: Lebenslauf, Motivationsschreiben";
+        (mi.attachmentsSuffix || "");
       document.getElementById("coverText").value = data.generated.coverLetterBody;
       document.getElementById("dlCv").href = `/pdf/${data.slug}/cv`;
       document.getElementById("dlCover").href = `/pdf/${data.slug}/cover`;
@@ -96,16 +108,16 @@
       document.getElementById("appUrl").value = window.location.origin + "/a/" + data.slug;
       document.getElementById("dlMailto").href = buildMailto(data.generated, data.slug);
       document.getElementById("dlEml").href = "/api/applications/" + data.slug + "/eml";
-      document.getElementById("mailtoHint").textContent = (data.generated.contactEmail
-        ? "Wird vorbereitet an: " + data.generated.contactEmail + ". "
-        : "Im Inserat wurde keine Kontakt-E-Mail gefunden — bitte Empfänger manuell eintragen. ") +
-        "Direkt öffnen = schnell, aber ohne echten Anhang (nur Links im Text). Herunterladen = mit Lebenslauf + Motivationsschreiben als echtem PDF-Anhang, danach im Mail-Programm öffnen und weiterleiten/senden.";
+      document.getElementById("mailtoHint").textContent =
+        (data.generated.contactEmail
+          ? (I18N.mailtoHintWithEmail || "%EMAIL%").replace("%EMAIL%", data.generated.contactEmail)
+          : I18N.mailtoHintNoEmail || "") + (I18N.mailtoHintSuffix || "");
 
       result.style.display = "block";
-      genStatus.textContent = "Fertig! Unten findest du alle Texte, Downloads und die digitale Bewerbungsseite.";
+      genStatus.textContent = I18N.generatedDone || "Fertig!";
       setTimeout(() => window.location.reload(), 4000);
     } catch (err) {
-      genStatus.textContent = "Fehler: " + err.message;
+      genStatus.textContent = (I18N.errorPrefix || "Fehler: ") + err.message;
       genStatus.className = "status err";
     } finally {
       generateBtn.disabled = false;
@@ -119,7 +131,7 @@
       el.select();
       navigator.clipboard.writeText(el.value).then(() => {
         const old = btn.textContent;
-        btn.textContent = "Kopiert ✓";
+        btn.textContent = I18N.copiedBtn || "Kopiert ✓";
         setTimeout(() => (btn.textContent = old), 1500);
       });
     });
@@ -127,7 +139,7 @@
 
   document.querySelectorAll("[data-delete]").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      if (!confirm("Diese Bewerbung wirklich löschen? (Die digitale Seite ist danach nicht mehr erreichbar.)")) return;
+      if (!confirm(I18N.deleteAppConfirm || "Diese Bewerbung wirklich löschen?")) return;
       const slug = btn.dataset.delete;
       const res = await fetch(`/api/applications/${slug}`, { method: "DELETE" });
       if (res.ok) btn.closest("tr").remove();
@@ -161,14 +173,14 @@
 
   document.querySelectorAll("[data-delete-search]").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      if (!confirm("Diese gespeicherte Suche entfernen?")) return;
+      if (!confirm(I18N.deleteSearchConfirm || "Diese gespeicherte Suche entfernen?")) return;
       const id = btn.dataset.deleteSearch;
       try {
         const res = await fetch(`/api/searches/${id}`, { method: "DELETE" });
         if (!res.ok) throw new Error();
         btn.closest(".search-chip").remove();
       } catch {
-        alert("Suche konnte nicht entfernt werden.");
+        alert(I18N.searchRemoveError || "Suche konnte nicht entfernt werden.");
       }
     });
   });
@@ -211,16 +223,16 @@
       e.preventDefault();
       const slug = link.dataset.genInsights || link.dataset.regenInsights;
       const original = link.textContent;
-      link.textContent = "🔎 Recherchiere … (ca. 15–20s)";
+      link.textContent = I18N.insightsResearching || "🔎 Recherchiere …";
       link.style.pointerEvents = "none";
       try {
         const res = await fetch(`/api/applications/${slug}/company-insights`, { method: "POST" });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+        if (!res.ok) throw new Error(data.error || I18N.errorGeneric || "Unbekannter Fehler");
         window.open(`/pdf/${slug}/insights`, "_blank");
         window.location.reload();
       } catch (err) {
-        alert("Firmen-Insights konnten nicht erstellt werden: " + err.message);
+        alert((I18N.insightsError || "Fehler: ") + err.message);
         link.textContent = original;
         link.style.pointerEvents = "";
       }
@@ -233,7 +245,7 @@
       const slug = btn.dataset.togglePublic;
       const currentlyDisabled = btn.dataset.publicDisabled === "1";
       const nextDisabled = !currentlyDisabled;
-      if (nextDisabled && !confirm("Öffentliche Bewerbungsseite und PDF-Downloads für diese Bewerbung offline nehmen? Ein bereits versendeter Link zeigt danach nur noch 'nicht mehr verfügbar'. Im Dashboard bleibt alles erhalten.")) {
+      if (nextDisabled && !confirm(I18N.deactivateConfirm || "Öffentliche Seite offline nehmen?")) {
         return;
       }
       try {
@@ -245,7 +257,7 @@
         if (!res.ok) throw new Error();
         window.location.reload();
       } catch {
-        alert("Konnte den Status der öffentlichen Seite nicht ändern.");
+        alert(I18N.publicToggleError || "Konnte den Status der öffentlichen Seite nicht ändern.");
       }
     });
   });
@@ -267,7 +279,7 @@
         dot.style.background = opt.dataset.color || prevColor;
         sel.closest("tr").dataset.status = sel.value;
       } catch {
-        alert("Status konnte nicht gespeichert werden.");
+        alert(I18N.statusSaveError || "Status konnte nicht gespeichert werden.");
       }
     });
   });
@@ -287,7 +299,7 @@
         if (!res.ok) throw new Error();
         lastSaved = input.value;
       } catch {
-        alert("Notiz konnte nicht gespeichert werden.");
+        alert(I18N.noteSaveError || "Notiz konnte nicht gespeichert werden.");
       }
     });
   });
