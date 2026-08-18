@@ -3,6 +3,7 @@ const express = require("express");
 const multer = require("multer");
 
 const { DEFAULT_PROFILE, EMPTY_PROFILE, mergeExtractedProfile } = require("./lib/profile");
+const { DEFAULT_ACCENT } = require("./lib/accentColor");
 const { ensureDocuments } = require("./lib/assets");
 const documentLibrary = require("./lib/documentLibrary");
 const store = require("./lib/store");
@@ -59,6 +60,18 @@ function defaultProfileFor(user) {
 
 function getProfile(userId, user) {
   return store.loadProfile(userId, defaultProfileFor(user));
+}
+
+// Resolves an account's CURRENT accent color from just its userId — used by
+// the public routes below (/a/:slug, /pdf/:slug/cv, /pdf/:slug/cover), which
+// only ever have userId (via store.findApplicationAnyUser), not a full
+// req.user. Deliberately reads the LIVE profile rather than any
+// entry.profileSnapshot (frozen at generation time for the CV's factual
+// content) so that changing the brand color retroactively re-colors every
+// previously-generated digital page/PDF, not just future ones.
+function accentColorFor(userId) {
+  const profile = store.loadProfile(userId, EMPTY_PROFILE);
+  return (profile && profile.accentColor) || DEFAULT_ACCENT;
 }
 
 // ---------- Public static assets ----------
@@ -138,7 +151,8 @@ app.get("/a/:slug", (req, res) => {
     entry,
     libraryDocs,
     photo,
-    lang: entry.language
+    lang: entry.language,
+    accentColor: accentColorFor(userId)
   });
   res.set("Content-Type", "text/html; charset=utf-8").send(html);
 });
@@ -153,8 +167,9 @@ app.get("/pdf/:slug/cv", async (req, res) => {
   try {
     const qr = await buildQr(req, entry.slug);
     const photo = resolveMedia(userId, "photo");
+    const accentColor = accentColorFor(userId);
     const buffer = await renderPdfBufferFit(
-      (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr, photo, lang: entry.language }, level),
+      (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr, photo, lang: entry.language, accentColor }, level),
       { maxPages: 1 }
     );
     res.set({
@@ -178,8 +193,9 @@ app.get("/pdf/:slug/cover", async (req, res) => {
   try {
     const qr = await buildQr(req, entry.slug);
     const signature = resolveMedia(userId, "signature");
+    const accentColor = accentColorFor(userId);
     const buffer = await renderPdfBufferFit(
-      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature, lang: entry.language }, level),
+      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature, lang: entry.language, accentColor }, level),
       { maxPages: 1 }
     );
     res.set({
@@ -241,7 +257,8 @@ app.post("/api/auth/logout", (req, res) => {
 // blank one. Always skippable — never blocks access to the dashboard.
 app.get("/onboarding/cv-import", requireAuth, (req, res) => {
   const returnTo = safeNext(req.query.returnTo, "/");
-  res.set("Content-Type", "text/html; charset=utf-8").send(renderCvImportPage({ lang: langFromReq(req), returnTo }));
+  const accentColor = getProfile(req.user.id, req.user).accentColor;
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderCvImportPage({ lang: langFromReq(req), returnTo, accentColor }));
 });
 
 app.post("/api/onboarding/cv-import", requireAuth, upload.single("file"), async (req, res) => {
@@ -294,6 +311,7 @@ app.post("/api/onboarding/cv-clarify", requireAuth, (req, res) => {
 // ---------- Protected: the tool itself (per-account data only) ----------
 app.get("/", requireAuth, (req, res) => {
   const applications = store.listApplications(req.user.id);
+  const profile = getProfile(req.user.id, req.user);
   res.set("Content-Type", "text/html; charset=utf-8").send(
     renderIndexPage({
       applications,
@@ -302,7 +320,8 @@ app.get("/", requireAuth, (req, res) => {
       baseUrl: baseUrlFor(req),
       savedSearches: store.listSearches(req.user.id),
       username: req.user.username,
-      lang: langFromReq(req)
+      lang: langFromReq(req),
+      accentColor: profile.accentColor
     })
   );
 });
@@ -369,7 +388,8 @@ app.post("/api/generate", requireAuth, async (req, res) => {
 app.get("/posting/:slug", requireAuth, (req, res) => {
   const entry = store.getApplication(req.user.id, req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
-  res.set("Content-Type", "text/html; charset=utf-8").send(renderPostingPage({ entry, lang: langFromReq(req) }));
+  const accentColor = getProfile(req.user.id, req.user).accentColor;
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderPostingPage({ entry, lang: langFromReq(req), accentColor }));
 });
 
 app.delete("/api/applications/:slug", requireAuth, (req, res) => {
@@ -442,7 +462,8 @@ app.get("/pdf/:slug/insights", requireAuth, async (req, res) => {
     return res.status(404).send("Noch nicht erstellt — bitte zuerst im Dashboard über den Button 'Firmen-Insights erstellen' generieren.");
   }
   try {
-    const buffer = await renderPdfBuffer(buildInsightsDocDefinition(entry, entry.language));
+    const accentColor = getProfile(req.user.id, req.user).accentColor;
+    const buffer = await renderPdfBuffer(buildInsightsDocDefinition(entry, entry.language, accentColor));
     const companyName = (entry.generated && entry.generated.company) || entry.company || "Firma";
     res.set({
       "Content-Type": "application/pdf",
@@ -465,19 +486,20 @@ app.get("/api/applications/:slug/eml", requireAuth, async (req, res) => {
   try {
     const qr = await buildQr(req, entry.slug);
     const signature = resolveMedia(req.user.id, "signature");
+    const accentColor = getProfile(req.user.id, req.user).accentColor;
     const [cvBuffer, coverBuffer] = await Promise.all([
       renderPdfBufferFit(
         (level) =>
           buildCvDocDefinition(
             entry.profileSnapshot,
             entry.generated,
-            { qr, photo: resolveMedia(req.user.id, "photo"), lang: entry.language },
+            { qr, photo: resolveMedia(req.user.id, "photo"), lang: entry.language, accentColor },
             level
           ),
         { maxPages: 1 }
       ),
       renderPdfBufferFit(
-        (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature, lang: entry.language }, level),
+        (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature, lang: entry.language, accentColor }, level),
         { maxPages: 1 }
       )
     ]);
@@ -522,7 +544,8 @@ app.get("/profile", requireAuth, (req, res) => {
       libraryCategories: documentLibrary.CATEGORIES,
       username: req.user.username,
       lang: langFromReq(req),
-      imported: req.query.imported === "1"
+      imported: req.query.imported === "1",
+      accentColor: profile.accentColor
     })
   );
 });
