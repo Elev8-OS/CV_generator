@@ -2,7 +2,7 @@ const path = require("path");
 const express = require("express");
 const multer = require("multer");
 
-const { DEFAULT_PROFILE, EMPTY_PROFILE, mergeExtractedProfile } = require("./lib/profile");
+const { DEFAULT_PROFILE, EMPTY_PROFILE, mergeExtractedProfile, mergeAdditionalExperience } = require("./lib/profile");
 const { DEFAULT_ACCENT } = require("./lib/accentColor");
 const { ensureDocuments } = require("./lib/assets");
 const documentLibrary = require("./lib/documentLibrary");
@@ -610,6 +610,32 @@ app.post("/api/profile", requireAuth, (req, res) => {
   }
   store.saveProfile(req.user.id, body);
   res.json({ ok: true });
+});
+
+// Lets someone whose original CV import is out of date add newly-found
+// positions from a supplementary document (or just a pasted text block)
+// WITHOUT overwriting anything already in their profile — see
+// lib/profile.js mergeAdditionalExperience for the additive-only merge
+// semantics. Reuses the same extraction as the first-time CV import.
+app.post("/api/profile/experience/import", requireAuth, upload.single("file"), async (req, res) => {
+  try {
+    let cvText = String((req.body && req.body.cvText) || "").trim();
+    if (!cvText && req.file) {
+      cvText = await extractTextFromFile(req.file.buffer, req.file.mimetype, req.file.originalname);
+    }
+    if (!cvText || cvText.trim().length < 30) {
+      return res.status(400).json({ error: t(langFromReq(req), "cvImport.errorNoInput") });
+    }
+    const extracted = await extractProfileFromCv({ cvText, uiLang: langFromReq(req) });
+    const existing = getProfile(req.user.id, req.user);
+    const { profile, addedCount } = mergeAdditionalExperience(existing, extracted);
+    store.saveProfile(req.user.id, profile);
+    res.json({ ok: true, addedCount });
+  } catch (err) {
+    console.error(err);
+    const msg = err.code === "NO_API_KEY" ? err.message : err.message || t(langFromReq(req), "cvImport.errorGeneric");
+    res.status(500).json({ error: msg });
+  }
 });
 
 app.post("/api/profile/reset", requireAuth, (req, res) => {
