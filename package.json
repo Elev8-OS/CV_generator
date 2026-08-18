@@ -1,7 +1,7 @@
 {
   "name": "raffael-bewerbung",
   "version": "1.0.0",
-  "description": "Bewerbungs-Generator für Raffael Putra Wyss – erzeugt pro Stelleninserat ein massgeschneidertes Anschreiben, CV-PDF und eine digitale Bewerbungsseite.",
+  "description": "Bewerbungs-Generator – erzeugt pro Stelleninserat ein massgeschneidertes Anschreiben, CV-PDF und eine digitale Bewerbungsseite. Mehrbenutzerfähig, jedes Konto mit eigenem Profil und eigenen Bewerbungen.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "bcryptjs": "^2.4.3",
     "cheerio": "^1.0.0",
     "express": "^4.21.1",
     "multer": "^2.2.0",
