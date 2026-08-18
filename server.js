@@ -2,12 +2,12 @@ const path = require("path");
 const express = require("express");
 const multer = require("multer");
 
-const { DEFAULT_PROFILE, EMPTY_PROFILE } = require("./lib/profile");
+const { DEFAULT_PROFILE, EMPTY_PROFILE, mergeExtractedProfile } = require("./lib/profile");
 const { ensureDocuments } = require("./lib/assets");
 const documentLibrary = require("./lib/documentLibrary");
 const store = require("./lib/store");
 const { saveMedia, resolveMedia, mediaStatus } = require("./lib/media");
-const { generateApplication } = require("./lib/ai");
+const { generateApplication, extractProfileFromCv } = require("./lib/ai");
 const { STATUSES, isValidStatus } = require("./lib/statuses");
 const { fetchJobPostingText } = require("./lib/fetchJob");
 const { findDuplicateApplication } = require("./lib/dedupe");
@@ -23,6 +23,8 @@ const { buildInsightsDocDefinition } = require("./lib/pdf/insights");
 const { generateCompanyInsights } = require("./lib/companyInsights");
 const { qrDataUri } = require("./lib/qr");
 const { buildApplicationEml } = require("./lib/eml");
+const { extractTextFromFile } = require("./lib/cvParse");
+const { t, LANGS, isValidLang, normalizeLang, langFromReq, LANG_COOKIE } = require("./lib/i18n");
 const { renderIndexPage } = require("./lib/pages/indexPage");
 const { renderAppPage } = require("./lib/pages/appPage");
 const { renderDeactivatedPage } = require("./lib/pages/deactivatedPage");
@@ -30,6 +32,7 @@ const { renderProfilePage } = require("./lib/pages/profilePage");
 const { renderPostingPage } = require("./lib/pages/postingPage");
 const { renderLoginPage } = require("./lib/pages/loginPage");
 const { renderSignupPage } = require("./lib/pages/signupPage");
+const { renderCvImportPage } = require("./lib/pages/cvImportPage");
 
 // Decode the two bundled reference PDFs to disk first (documents.js/migrate.js
 // fall back to these bundled defaults) — must run before the one-time
@@ -61,6 +64,27 @@ function getProfile(userId, user) {
 // ---------- Public static assets ----------
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Only allow redirecting back to a same-site relative path — "next"/"returnTo"
+// query params are attacker-influenceable (open-redirect risk otherwise).
+function safeNext(value, fallback = "/") {
+  const v = typeof value === "string" ? value : "";
+  return v.startsWith("/") && !v.startsWith("//") ? v : fallback;
+}
+
+// Sets the UI-language cookie (DE/FR/EN dashboard chrome) and bounces back to
+// wherever the switcher was clicked from. Not tied to any account — works
+// pre-login on /login and /signup too. One year, not HttpOnly (no security
+// value in hiding a language preference, and it keeps this cookie simple to
+// reason about / doesn't need signing since it never grants access to anything).
+app.get("/lang/:code", (req, res) => {
+  const code = isValidLang(req.params.code) ? req.params.code : "de";
+  res.append(
+    "Set-Cookie",
+    `${LANG_COOKIE}=${encodeURIComponent(code)}; Path=/; Max-Age=${365 * 24 * 60 * 60}; SameSite=Lax`
+  );
+  res.redirect(safeNext(req.query.next));
+});
 
 // Public: a digital application page links to library documents (Zeugnisse,
 // Zertifikate, ...) by id alone, with no user/session context — the browser
@@ -104,7 +128,7 @@ app.get("/a/:slug", (req, res) => {
   if (!found) return res.status(404).send("Bewerbung nicht gefunden.");
   const { userId, entry } = found;
   if (entry.publicDisabled) {
-    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
+    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage(entry.language));
   }
   const libraryDocs = documentLibrary.listLibraryDocuments(userId);
   const photo = resolveMedia(userId, "photo");
@@ -113,7 +137,8 @@ app.get("/a/:slug", (req, res) => {
     generated: entry.generated,
     entry,
     libraryDocs,
-    photo
+    photo,
+    lang: entry.language
   });
   res.set("Content-Type", "text/html; charset=utf-8").send(html);
 });
@@ -123,13 +148,13 @@ app.get("/pdf/:slug/cv", async (req, res) => {
   if (!found) return res.status(404).send("Bewerbung nicht gefunden.");
   const { userId, entry } = found;
   if (entry.publicDisabled) {
-    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
+    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage(entry.language));
   }
   try {
     const qr = await buildQr(req, entry.slug);
     const photo = resolveMedia(userId, "photo");
     const buffer = await renderPdfBufferFit(
-      (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr, photo }, level),
+      (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr, photo, lang: entry.language }, level),
       { maxPages: 1 }
     );
     res.set({
@@ -148,13 +173,13 @@ app.get("/pdf/:slug/cover", async (req, res) => {
   if (!found) return res.status(404).send("Bewerbung nicht gefunden.");
   const { userId, entry } = found;
   if (entry.publicDisabled) {
-    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
+    return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage(entry.language));
   }
   try {
     const qr = await buildQr(req, entry.slug);
     const signature = resolveMedia(userId, "signature");
     const buffer = await renderPdfBufferFit(
-      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature }, level),
+      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature, lang: entry.language }, level),
       { maxPages: 1 }
     );
     res.set({
@@ -171,19 +196,19 @@ app.get("/pdf/:slug/cover", async (req, res) => {
 // ---------- Auth: signup / login / logout ----------
 app.get("/login", (req, res) => {
   if (getSessionUserId(req)) return res.redirect("/");
-  const next = typeof req.query.next === "string" ? req.query.next : "/";
-  res.set("Content-Type", "text/html; charset=utf-8").send(renderLoginPage({ next }));
+  const next = safeNext(req.query.next);
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderLoginPage({ next, lang: langFromReq(req) }));
 });
 
 app.get("/signup", (req, res) => {
   if (getSessionUserId(req)) return res.redirect("/");
-  res.set("Content-Type", "text/html; charset=utf-8").send(renderSignupPage());
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderSignupPage({ lang: langFromReq(req) }));
 });
 
 app.post("/api/auth/signup", (req, res) => {
   try {
     const { username, password } = req.body || {};
-    const user = createUser({ username, password });
+    const user = createUser({ username, password, lang: langFromReq(req) });
     // Seed a real (empty) profile.json right away so this account never
     // falls back to Raffael's DEFAULT_PROFILE by accident (see
     // defaultProfileFor above).
@@ -199,7 +224,7 @@ app.post("/api/auth/login", (req, res) => {
   const { username, password } = req.body || {};
   const user = findUserByUsername(username);
   if (!user || !verifyPassword(user, password)) {
-    return res.status(401).json({ error: "Benutzername oder Passwort ist falsch." });
+    return res.status(401).json({ error: t(langFromReq(req), "auth.wrongCredentials") });
   }
   setSessionCookie(res, user.id);
   res.json({ ok: true, user: { username: user.username } });
@@ -208,6 +233,35 @@ app.post("/api/auth/login", (req, res) => {
 app.post("/api/auth/logout", (req, res) => {
   clearSessionCookie(res);
   res.json({ ok: true });
+});
+
+// ---------- Onboarding: optional CV import ----------
+// Shown right after signup (and reachable again later from /profile) so a
+// brand-new account can start from an AI-prefilled profile instead of a
+// blank one. Always skippable — never blocks access to the dashboard.
+app.get("/onboarding/cv-import", requireAuth, (req, res) => {
+  const returnTo = safeNext(req.query.returnTo, "/");
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderCvImportPage({ lang: langFromReq(req), returnTo }));
+});
+
+app.post("/api/onboarding/cv-import", requireAuth, upload.single("file"), async (req, res) => {
+  try {
+    let cvText = String((req.body && req.body.cvText) || "").trim();
+    if (!cvText && req.file) {
+      cvText = await extractTextFromFile(req.file.buffer, req.file.mimetype, req.file.originalname);
+    }
+    if (!cvText || cvText.trim().length < 30) {
+      return res.status(400).json({ error: t(langFromReq(req), "cvImport.errorNoInput") });
+    }
+    const extracted = await extractProfileFromCv({ cvText });
+    const merged = mergeExtractedProfile(extracted);
+    store.saveProfile(req.user.id, merged);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    const msg = err.code === "NO_API_KEY" ? err.message : err.message || t(langFromReq(req), "cvImport.errorGeneric");
+    res.status(500).json({ error: msg });
+  }
 });
 
 // ---------- Protected: the tool itself (per-account data only) ----------
@@ -220,31 +274,32 @@ app.get("/", requireAuth, (req, res) => {
       statuses: STATUSES,
       baseUrl: baseUrlFor(req),
       savedSearches: store.listSearches(req.user.id),
-      username: req.user.username
+      username: req.user.username,
+      lang: langFromReq(req)
     })
   );
 });
 
 app.post("/api/generate", requireAuth, async (req, res) => {
+  const uiLang = langFromReq(req);
   const limit = rateLimit.checkAndIncrement(req.user.id, "generate");
   if (!limit.ok) {
-    return res.status(429).json({
-      error: `Tageslimit erreicht (max. ${limit.limit} Generierungen/Tag). Bitte morgen wieder versuchen.`
-    });
+    return res.status(429).json({ error: t(uiLang, "server.rateLimitGenerate", { limit: limit.limit }) });
   }
   try {
-    const { jobText, jobUrl } = req.body || {};
+    const { jobText, jobUrl, language } = req.body || {};
+    const appLang = isValidLang(language) ? language : "de";
     let text = jobText;
     if (!text && jobUrl) {
       text = await fetchJobPostingText(jobUrl);
     }
     if (!text || text.trim().length < 30) {
-      return res.status(400).json({ error: "Bitte einen ausreichend langen Stelleninserat-Text oder einen gültigen Link angeben." });
+      return res.status(400).json({ error: t(uiLang, "server.needTextOrUrl") });
     }
 
     const profile = getProfile(req.user.id, req.user);
     const libraryDocs = documentLibrary.listLibraryDocuments(req.user.id);
-    const generated = await generateApplication({ profile, jobPostingText: text, jobUrl, libraryDocs });
+    const generated = await generateApplication({ profile, jobPostingText: text, jobUrl, libraryDocs, language: appLang });
 
     // Dublettenprüfung: die KI kann Firmennamen leicht unterschiedlich
     // schreiben (z.B. "Muster AG" vs. "Muster") — findDuplicateApplication
@@ -261,6 +316,7 @@ app.post("/api/generate", requireAuth, async (req, res) => {
       jobPostingRaw: text.slice(0, 8000),
       generated,
       profileSnapshot: profile,
+      language: appLang,
       duplicateOfSlug: duplicate ? duplicate.slug : null
     });
 
@@ -271,14 +327,14 @@ app.post("/api/generate", requireAuth, async (req, res) => {
         ? {
             slug: duplicate.slug,
             status: duplicate.status,
-            statusLabel: (STATUSES.find((s) => s.key === duplicate.status) || {}).label,
+            statusLabel: t(uiLang, `status.${duplicate.status}`),
             createdAt: duplicate.createdAt
           }
         : null
     });
   } catch (err) {
     console.error(err);
-    const msg = err.code === "NO_API_KEY" ? err.message : err.message || "Unbekannter Fehler bei der Generierung.";
+    const msg = err.code === "NO_API_KEY" ? err.message : err.message || t(uiLang, "server.genericGenerateError");
     res.status(500).json({ error: msg });
   }
 });
@@ -286,7 +342,7 @@ app.post("/api/generate", requireAuth, async (req, res) => {
 app.get("/posting/:slug", requireAuth, (req, res) => {
   const entry = store.getApplication(req.user.id, req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
-  res.set("Content-Type", "text/html; charset=utf-8").send(renderPostingPage({ entry }));
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderPostingPage({ entry, lang: langFromReq(req) }));
 });
 
 app.delete("/api/applications/:slug", requireAuth, (req, res) => {
@@ -297,7 +353,7 @@ app.delete("/api/applications/:slug", requireAuth, (req, res) => {
 app.patch("/api/applications/:slug/status", requireAuth, (req, res) => {
   const { status } = req.body || {};
   if (!isValidStatus(status)) {
-    return res.status(400).json({ error: "Ungültiger Status." });
+    return res.status(400).json({ error: t(langFromReq(req), "server.invalidStatus") });
   }
   const entry = store.updateApplicationStatus(req.user.id, req.params.slug, status);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
@@ -329,25 +385,25 @@ app.patch("/api/applications/:slug/public", requireAuth, (req, res) => {
 // aus: das ist die private Gesprächsvorbereitung des Kontoinhabers, nicht
 // Teil der Bewerbung, die die Firma sieht.
 app.post("/api/applications/:slug/company-insights", requireAuth, async (req, res) => {
+  const uiLang = langFromReq(req);
   const entry = store.getApplication(req.user.id, req.params.slug);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
   const limit = rateLimit.checkAndIncrement(req.user.id, "insights");
   if (!limit.ok) {
-    return res.status(429).json({
-      error: `Tageslimit erreicht (max. ${limit.limit} Firmen-Insights/Tag). Bitte morgen wieder versuchen.`
-    });
+    return res.status(429).json({ error: t(uiLang, "server.rateLimitInsights", { limit: limit.limit }) });
   }
   try {
     const insights = await generateCompanyInsights({
       company: (entry.generated && entry.generated.company) || entry.company,
       jobTitle: (entry.generated && entry.generated.jobTitle) || entry.jobTitle,
-      jobPostingText: entry.jobPostingRaw
+      jobPostingText: entry.jobPostingRaw,
+      language: entry.language || "de"
     });
     const updated = store.saveCompanyInsights(req.user.id, entry.slug, insights);
     res.json({ ok: true, generatedAt: updated.companyInsights.generatedAt });
   } catch (err) {
     console.error(err);
-    const msg = err.code === "NO_API_KEY" ? err.message : err.message || "Firmen-Insights konnten nicht erstellt werden.";
+    const msg = err.code === "NO_API_KEY" ? err.message : err.message || t(uiLang, "server.genericInsightsError");
     res.status(500).json({ error: msg });
   }
 });
@@ -359,7 +415,7 @@ app.get("/pdf/:slug/insights", requireAuth, async (req, res) => {
     return res.status(404).send("Noch nicht erstellt — bitte zuerst im Dashboard über den Button 'Firmen-Insights erstellen' generieren.");
   }
   try {
-    const buffer = await renderPdfBuffer(buildInsightsDocDefinition(entry));
+    const buffer = await renderPdfBuffer(buildInsightsDocDefinition(entry, entry.language));
     const companyName = (entry.generated && entry.generated.company) || entry.company || "Firma";
     res.set({
       "Content-Type": "application/pdf",
@@ -384,11 +440,17 @@ app.get("/api/applications/:slug/eml", requireAuth, async (req, res) => {
     const signature = resolveMedia(req.user.id, "signature");
     const [cvBuffer, coverBuffer] = await Promise.all([
       renderPdfBufferFit(
-        (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr, photo: resolveMedia(req.user.id, "photo") }, level),
+        (level) =>
+          buildCvDocDefinition(
+            entry.profileSnapshot,
+            entry.generated,
+            { qr, photo: resolveMedia(req.user.id, "photo"), lang: entry.language },
+            level
+          ),
         { maxPages: 1 }
       ),
       renderPdfBufferFit(
-        (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature }, level),
+        (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature, lang: entry.language }, level),
         { maxPages: 1 }
       )
     ]);
@@ -431,7 +493,9 @@ app.get("/profile", requireAuth, (req, res) => {
       media: mediaStatus(req.user.id),
       libraryDocs: documentLibrary.listLibraryDocuments(req.user.id),
       libraryCategories: documentLibrary.CATEGORIES,
-      username: req.user.username
+      username: req.user.username,
+      lang: langFromReq(req),
+      imported: req.query.imported === "1"
     })
   );
 });
@@ -448,7 +512,7 @@ app.get("/api/documents/library", requireAuth, (req, res) => {
 
 app.post("/api/documents/library", requireAuth, upload.single("file"), (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
+    if (!req.file) return res.status(400).json({ error: t(langFromReq(req), "server.noFileReceived") });
     const { category, title, skillsText } = req.body || {};
     const entry = documentLibrary.addLibraryDocument(req.user.id, {
       buffer: req.file.buffer,
@@ -456,7 +520,8 @@ app.post("/api/documents/library", requireAuth, upload.single("file"), (req, res
       originalName: req.file.originalname,
       category,
       title,
-      skillsText
+      skillsText,
+      lang: langFromReq(req)
     });
     res.json({ ok: true, document: entry });
   } catch (err) {
@@ -480,8 +545,8 @@ app.get("/api/media/mine/:key", requireAuth, (req, res) => {
 
 app.post("/api/media/:key", requireAuth, upload.single("file"), (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
-    saveMedia(req.user.id, req.params.key, req.file.buffer, req.file.mimetype);
+    if (!req.file) return res.status(400).json({ error: t(langFromReq(req), "server.noFileReceived") });
+    saveMedia(req.user.id, req.params.key, req.file.buffer, req.file.mimetype, langFromReq(req));
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -491,7 +556,7 @@ app.post("/api/media/:key", requireAuth, upload.single("file"), (req, res) => {
 app.post("/api/profile", requireAuth, (req, res) => {
   const body = req.body;
   if (!body || typeof body !== "object" || !body.personal || !Array.isArray(body.experience)) {
-    return res.status(400).json({ error: "Ungültige Profilstruktur (personal & experience erforderlich)." });
+    return res.status(400).json({ error: t(langFromReq(req), "server.invalidProfileStructure") });
   }
   store.saveProfile(req.user.id, body);
   res.json({ ok: true });
@@ -505,18 +570,19 @@ app.post("/api/profile/reset", requireAuth, (req, res) => {
 // Gespeicherte Job-Suchen: kein automatisches Scraping/RSS (siehe lib/store.js
 // für die Begründung), nur die eigenen Suchlinks als Ein-Klick-Schnellzugriff.
 app.post("/api/searches", requireAuth, (req, res) => {
+  const uiLang = langFromReq(req);
   const { label, url } = req.body || {};
   if (!label || !String(label).trim()) {
-    return res.status(400).json({ error: "Bitte einen Namen für die Suche angeben." });
+    return res.status(400).json({ error: t(uiLang, "server.searchNameRequired") });
   }
   let parsed;
   try {
     parsed = new URL(url);
   } catch {
-    return res.status(400).json({ error: "Ungültiger Link." });
+    return res.status(400).json({ error: t(uiLang, "server.invalidLink") });
   }
   if (!["http:", "https:"].includes(parsed.protocol)) {
-    return res.status(400).json({ error: "Nur http(s)-Links sind erlaubt." });
+    return res.status(400).json({ error: t(uiLang, "server.onlyHttpLinks") });
   }
   const entry = store.addSearch(req.user.id, { label: String(label).trim(), url: parsed.toString() });
   res.json({ ok: true, entry });
