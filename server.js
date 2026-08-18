@@ -2,17 +2,20 @@ const path = require("path");
 const express = require("express");
 const multer = require("multer");
 
-const { DEFAULT_PROFILE } = require("./lib/profile");
+const { DEFAULT_PROFILE, EMPTY_PROFILE } = require("./lib/profile");
 const { ensureDocuments } = require("./lib/assets");
-const { saveUploadedDocument, resolveDocumentPath, documentStatus } = require("./lib/documents");
-const { saveMedia, resolveMedia, mediaStatus } = require("./lib/media");
 const documentLibrary = require("./lib/documentLibrary");
 const store = require("./lib/store");
+const { saveMedia, resolveMedia, mediaStatus } = require("./lib/media");
 const { generateApplication } = require("./lib/ai");
 const { STATUSES, isValidStatus } = require("./lib/statuses");
 const { fetchJobPostingText } = require("./lib/fetchJob");
 const { findDuplicateApplication } = require("./lib/dedupe");
 const { requireAuth } = require("./lib/auth");
+const { getSessionUserId, setSessionCookie, clearSessionCookie } = require("./lib/session");
+const { createUser, findUserByUsername, verifyPassword } = require("./lib/users");
+const { migrateLegacyDataIfNeeded } = require("./lib/migrate");
+const rateLimit = require("./lib/rateLimit");
 const { renderPdfBufferFit, renderPdfBuffer } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
@@ -25,8 +28,15 @@ const { renderAppPage } = require("./lib/pages/appPage");
 const { renderDeactivatedPage } = require("./lib/pages/deactivatedPage");
 const { renderProfilePage } = require("./lib/pages/profilePage");
 const { renderPostingPage } = require("./lib/pages/postingPage");
+const { renderLoginPage } = require("./lib/pages/loginPage");
+const { renderSignupPage } = require("./lib/pages/signupPage");
 
+// Decode the two bundled reference PDFs to disk first (documents.js/migrate.js
+// fall back to these bundled defaults) — must run before the one-time
+// migration below, which folds whichever version was live into Raffael's
+// document library.
 ensureDocuments();
+migrateLegacyDataIfNeeded();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -34,33 +44,34 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 
 const PORT = process.env.PORT || 3000;
 
-function getProfile() {
-  return store.loadProfile(DEFAULT_PROFILE);
+// Raffael's own account (created by the migration) keeps his real shipped
+// data as its "reset to default" target — that's his own baseline, not a
+// generic template. Every other (self-registered) account has no such
+// baseline, so their reset target is just a clean empty profile; using
+// DEFAULT_PROFILE there would leak Raffael's personal data into a stranger's
+// account.
+function defaultProfileFor(user) {
+  return user && user.username === "raffael" ? DEFAULT_PROFILE : EMPTY_PROFILE;
+}
+
+function getProfile(userId, user) {
+  return store.loadProfile(userId, defaultProfileFor(user));
 }
 
 // ---------- Public static assets ----------
 app.use(express.static(path.join(__dirname, "public")));
-app.get("/documents/lehrzeugnis.pdf", (req, res) => {
-  const p = resolveDocumentPath("lehrzeugnis");
-  if (!p) return res.status(404).send("Lehrzeugnis wurde noch nicht hochgeladen. Bitte unter /profile hochladen.");
-  res.sendFile(p);
-});
-app.get("/documents/efz.pdf", (req, res) => {
-  const p = resolveDocumentPath("efz");
-  if (!p) return res.status(404).send("EFZ wurde noch nicht hochgeladen. Bitte unter /profile hochladen.");
-  res.sendFile(p);
-});
-app.get("/media/:key", (req, res) => {
-  const m = resolveMedia(req.params.key);
-  if (!m) return res.status(404).send("Nicht gefunden.");
-  res.set("Content-Type", m.mime).sendFile(m.path);
-});
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Public: a digital application page links to library documents (Zeugnisse,
+// Zertifikate, ...) by id alone, with no user/session context — the browser
+// hitting this is the employer, not a logged-in account. See
+// documentLibrary.resolveLibraryFileAnyUser for why a scan across accounts is
+// safe & cheap at this tool's scale.
 app.get("/documents/library/:id", (req, res) => {
-  const file = documentLibrary.resolveLibraryFile(req.params.id);
+  const file = documentLibrary.resolveLibraryFileAnyUser(req.params.id);
   if (!file) return res.status(404).send("Dokument nicht gefunden.");
   res.set("Content-Type", file.mime).sendFile(file.path);
 });
-app.get("/health", (req, res) => res.json({ ok: true }));
 
 // Railway always terminates TLS at the edge, so the public URL is always
 // https even though the app itself just sees a plain HTTP request.
@@ -83,32 +94,42 @@ async function buildQr(req, slug) {
 }
 
 // ---------- Public: digital application page + generated PDFs ----------
+// These are reached directly by an employer's browser via a shared link, with
+// no session/user context — the owning account is resolved from the slug
+// itself via store.findApplicationAnyUser (slugs carry a random hex suffix,
+// so cross-account collisions are effectively impossible at this tool's
+// scale — see store.js for the full reasoning).
 app.get("/a/:slug", (req, res) => {
-  const entry = store.getApplication(req.params.slug);
-  if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  const found = store.findApplicationAnyUser(req.params.slug);
+  if (!found) return res.status(404).send("Bewerbung nicht gefunden.");
+  const { userId, entry } = found;
   if (entry.publicDisabled) {
     return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
   }
-  const libraryDocs = documentLibrary.listLibraryDocuments();
+  const libraryDocs = documentLibrary.listLibraryDocuments(userId);
+  const photo = resolveMedia(userId, "photo");
   const html = renderAppPage({
     profile: entry.profileSnapshot,
     generated: entry.generated,
     entry,
-    libraryDocs
+    libraryDocs,
+    photo
   });
   res.set("Content-Type", "text/html; charset=utf-8").send(html);
 });
 
 app.get("/pdf/:slug/cv", async (req, res) => {
-  const entry = store.getApplication(req.params.slug);
-  if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  const found = store.findApplicationAnyUser(req.params.slug);
+  if (!found) return res.status(404).send("Bewerbung nicht gefunden.");
+  const { userId, entry } = found;
   if (entry.publicDisabled) {
     return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
   }
   try {
     const qr = await buildQr(req, entry.slug);
+    const photo = resolveMedia(userId, "photo");
     const buffer = await renderPdfBufferFit(
-      (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
+      (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr, photo }, level),
       { maxPages: 1 }
     );
     res.set({
@@ -123,15 +144,17 @@ app.get("/pdf/:slug/cv", async (req, res) => {
 });
 
 app.get("/pdf/:slug/cover", async (req, res) => {
-  const entry = store.getApplication(req.params.slug);
-  if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
+  const found = store.findApplicationAnyUser(req.params.slug);
+  if (!found) return res.status(404).send("Bewerbung nicht gefunden.");
+  const { userId, entry } = found;
   if (entry.publicDisabled) {
     return res.status(410).set("Content-Type", "text/html; charset=utf-8").send(renderDeactivatedPage());
   }
   try {
     const qr = await buildQr(req, entry.slug);
+    const signature = resolveMedia(userId, "signature");
     const buffer = await renderPdfBufferFit(
-      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
+      (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature }, level),
       { maxPages: 1 }
     );
     res.set({
@@ -145,21 +168,70 @@ app.get("/pdf/:slug/cover", async (req, res) => {
   }
 });
 
-// ---------- Protected: the tool itself ----------
+// ---------- Auth: signup / login / logout ----------
+app.get("/login", (req, res) => {
+  if (getSessionUserId(req)) return res.redirect("/");
+  const next = typeof req.query.next === "string" ? req.query.next : "/";
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderLoginPage({ next }));
+});
+
+app.get("/signup", (req, res) => {
+  if (getSessionUserId(req)) return res.redirect("/");
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderSignupPage());
+});
+
+app.post("/api/auth/signup", (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    const user = createUser({ username, password });
+    // Seed a real (empty) profile.json right away so this account never
+    // falls back to Raffael's DEFAULT_PROFILE by accident (see
+    // defaultProfileFor above).
+    store.saveProfile(user.id, EMPTY_PROFILE);
+    setSessionCookie(res, user.id);
+    res.json({ ok: true, user: { username: user.username } });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/auth/login", (req, res) => {
+  const { username, password } = req.body || {};
+  const user = findUserByUsername(username);
+  if (!user || !verifyPassword(user, password)) {
+    return res.status(401).json({ error: "Benutzername oder Passwort ist falsch." });
+  }
+  setSessionCookie(res, user.id);
+  res.json({ ok: true, user: { username: user.username } });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+// ---------- Protected: the tool itself (per-account data only) ----------
 app.get("/", requireAuth, (req, res) => {
-  const applications = store.listApplications();
+  const applications = store.listApplications(req.user.id);
   res.set("Content-Type", "text/html; charset=utf-8").send(
     renderIndexPage({
       applications,
       hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
       statuses: STATUSES,
       baseUrl: baseUrlFor(req),
-      savedSearches: store.listSearches()
+      savedSearches: store.listSearches(req.user.id),
+      username: req.user.username
     })
   );
 });
 
 app.post("/api/generate", requireAuth, async (req, res) => {
+  const limit = rateLimit.checkAndIncrement(req.user.id, "generate");
+  if (!limit.ok) {
+    return res.status(429).json({
+      error: `Tageslimit erreicht (max. ${limit.limit} Generierungen/Tag). Bitte morgen wieder versuchen.`
+    });
+  }
   try {
     const { jobText, jobUrl } = req.body || {};
     let text = jobText;
@@ -170,19 +242,19 @@ app.post("/api/generate", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Bitte einen ausreichend langen Stelleninserat-Text oder einen gültigen Link angeben." });
     }
 
-    const profile = getProfile();
-    const libraryDocs = documentLibrary.listLibraryDocuments();
+    const profile = getProfile(req.user.id, req.user);
+    const libraryDocs = documentLibrary.listLibraryDocuments(req.user.id);
     const generated = await generateApplication({ profile, jobPostingText: text, jobUrl, libraryDocs });
 
     // Dublettenprüfung: die KI kann Firmennamen leicht unterschiedlich
     // schreiben (z.B. "Muster AG" vs. "Muster") — findDuplicateApplication
     // vergleicht deshalb normalisiert statt exakt. Eine gefundene Dublette
-    // verhindert das Speichern NICHT (Raffael könnte bewusst erneut bei
+    // verhindert das Speichern NICHT (man könnte bewusst erneut bei
     // derselben Firma auf eine andere Stelle antworten), sondern wird nur
-    // sichtbar markiert, damit er es bewusst prüfen kann.
-    const duplicate = findDuplicateApplication(store.listApplications(), generated.company);
+    // sichtbar markiert, damit man es bewusst prüfen kann.
+    const duplicate = findDuplicateApplication(store.listApplications(req.user.id), generated.company);
 
-    const entry = store.createApplication({
+    const entry = store.createApplication(req.user.id, {
       jobTitle: generated.jobTitle,
       company: generated.company,
       jobUrl: jobUrl || null,
@@ -212,13 +284,13 @@ app.post("/api/generate", requireAuth, async (req, res) => {
 });
 
 app.get("/posting/:slug", requireAuth, (req, res) => {
-  const entry = store.getApplication(req.params.slug);
+  const entry = store.getApplication(req.user.id, req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   res.set("Content-Type", "text/html; charset=utf-8").send(renderPostingPage({ entry }));
 });
 
 app.delete("/api/applications/:slug", requireAuth, (req, res) => {
-  const ok = store.deleteApplication(req.params.slug);
+  const ok = store.deleteApplication(req.user.id, req.params.slug);
   res.json({ ok });
 });
 
@@ -227,14 +299,14 @@ app.patch("/api/applications/:slug/status", requireAuth, (req, res) => {
   if (!isValidStatus(status)) {
     return res.status(400).json({ error: "Ungültiger Status." });
   }
-  const entry = store.updateApplicationStatus(req.params.slug, status);
+  const entry = store.updateApplicationStatus(req.user.id, req.params.slug, status);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
   res.json({ ok: true, status: entry.status, statusUpdatedAt: entry.statusUpdatedAt });
 });
 
 app.patch("/api/applications/:slug/note", requireAuth, (req, res) => {
   const { note } = req.body || {};
-  const entry = store.updateApplicationNote(req.params.slug, note);
+  const entry = store.updateApplicationNote(req.user.id, req.params.slug, note);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
   res.json({ ok: true, note: entry.note });
 });
@@ -242,10 +314,10 @@ app.patch("/api/applications/:slug/note", requireAuth, (req, res) => {
 // Manually take the public digital application page + PDF downloads offline
 // (e.g. once a process is finished) without deleting the application itself —
 // the private dashboard entry, its status/note history and the .eml download
-// stay available to Raffael regardless.
+// stay available regardless.
 app.patch("/api/applications/:slug/public", requireAuth, (req, res) => {
   const { disabled } = req.body || {};
-  const entry = store.setPublicDisabled(req.params.slug, disabled);
+  const entry = store.setPublicDisabled(req.user.id, req.params.slug, disabled);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
   res.json({ ok: true, publicDisabled: entry.publicDisabled });
 });
@@ -254,18 +326,24 @@ app.patch("/api/applications/:slug/public", requireAuth, (req, res) => {
 // lib/companyInsights.js — bewusst KEIN reines KI-Gedächtnis, gerade kleinere
 // Firmen kennt das Modell sonst schlecht oder gar nicht) und cached das
 // Ergebnis auf der Bewerbung. Bewusst requireAuth + kein Link von /a/:slug
-// aus: das ist Raffaels private Gesprächsvorbereitung, nicht Teil der
-// Bewerbung, die die Firma sieht.
+// aus: das ist die private Gesprächsvorbereitung des Kontoinhabers, nicht
+// Teil der Bewerbung, die die Firma sieht.
 app.post("/api/applications/:slug/company-insights", requireAuth, async (req, res) => {
-  const entry = store.getApplication(req.params.slug);
+  const entry = store.getApplication(req.user.id, req.params.slug);
   if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
+  const limit = rateLimit.checkAndIncrement(req.user.id, "insights");
+  if (!limit.ok) {
+    return res.status(429).json({
+      error: `Tageslimit erreicht (max. ${limit.limit} Firmen-Insights/Tag). Bitte morgen wieder versuchen.`
+    });
+  }
   try {
     const insights = await generateCompanyInsights({
       company: (entry.generated && entry.generated.company) || entry.company,
       jobTitle: (entry.generated && entry.generated.jobTitle) || entry.jobTitle,
       jobPostingText: entry.jobPostingRaw
     });
-    const updated = store.saveCompanyInsights(entry.slug, insights);
+    const updated = store.saveCompanyInsights(req.user.id, entry.slug, insights);
     res.json({ ok: true, generatedAt: updated.companyInsights.generatedAt });
   } catch (err) {
     console.error(err);
@@ -275,7 +353,7 @@ app.post("/api/applications/:slug/company-insights", requireAuth, async (req, re
 });
 
 app.get("/pdf/:slug/insights", requireAuth, async (req, res) => {
-  const entry = store.getApplication(req.params.slug);
+  const entry = store.getApplication(req.user.id, req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   if (!entry.companyInsights) {
     return res.status(404).send("Noch nicht erstellt — bitte zuerst im Dashboard über den Button 'Firmen-Insights erstellen' generieren.");
@@ -296,20 +374,21 @@ app.get("/pdf/:slug/insights", requireAuth, async (req, res) => {
 
 // A mailto: link can never carry a real file attachment (hard limitation of
 // the mailto: standard itself). This route builds an actual .eml message —
-// CV and cover letter already embedded as real PDF attachments — so Raffael
-// can download it, open it in his mail app, and just forward/send it on.
+// CV and cover letter already embedded as real PDF attachments — so the user
+// can download it, open it in their mail app, and just forward/send it on.
 app.get("/api/applications/:slug/eml", requireAuth, async (req, res) => {
-  const entry = store.getApplication(req.params.slug);
+  const entry = store.getApplication(req.user.id, req.params.slug);
   if (!entry) return res.status(404).send("Bewerbung nicht gefunden.");
   try {
     const qr = await buildQr(req, entry.slug);
+    const signature = resolveMedia(req.user.id, "signature");
     const [cvBuffer, coverBuffer] = await Promise.all([
       renderPdfBufferFit(
-        (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
+        (level) => buildCvDocDefinition(entry.profileSnapshot, entry.generated, { qr, photo: resolveMedia(req.user.id, "photo") }, level),
         { maxPages: 1 }
       ),
       renderPdfBufferFit(
-        (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr }, level),
+        (level) => buildCoverDocDefinition(entry.profileSnapshot, entry.generated, { qr, signature }, level),
         { maxPages: 1 }
       )
     ]);
@@ -345,30 +424,33 @@ app.get("/api/applications/:slug/eml", requireAuth, async (req, res) => {
 });
 
 app.get("/profile", requireAuth, (req, res) => {
-  const profile = getProfile();
+  const profile = getProfile(req.user.id, req.user);
   res.set("Content-Type", "text/html; charset=utf-8").send(
     renderProfilePage({
       profileJson: JSON.stringify(profile, null, 2),
-      docs: documentStatus(),
-      media: mediaStatus(),
-      libraryDocs: documentLibrary.listLibraryDocuments(),
-      libraryCategories: documentLibrary.CATEGORIES
+      media: mediaStatus(req.user.id),
+      libraryDocs: documentLibrary.listLibraryDocuments(req.user.id),
+      libraryCategories: documentLibrary.CATEGORIES,
+      username: req.user.username
     })
   );
 });
 
 // NOTE: these two /api/documents/library routes must be registered BEFORE
-// the generic /api/documents/:key route below — otherwise Express matches
-// "library" as :key first and the library upload/list never gets reached.
+// any generic /api/documents/:key-style route — otherwise Express would
+// match "library" as :key first and the library upload/list would never be
+// reached. (There is no such generic route anymore — the old fixed
+// Lehrzeugnis/EFZ document slots were removed in favour of this library —
+// but the ordering note stays relevant if one is ever added back.)
 app.get("/api/documents/library", requireAuth, (req, res) => {
-  res.json({ documents: documentLibrary.listLibraryDocuments(), categories: documentLibrary.CATEGORIES });
+  res.json({ documents: documentLibrary.listLibraryDocuments(req.user.id), categories: documentLibrary.CATEGORIES });
 });
 
 app.post("/api/documents/library", requireAuth, upload.single("file"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
     const { category, title, skillsText } = req.body || {};
-    const entry = documentLibrary.addLibraryDocument({
+    const entry = documentLibrary.addLibraryDocument(req.user.id, {
       buffer: req.file.buffer,
       mimetype: req.file.mimetype,
       originalName: req.file.originalname,
@@ -383,27 +465,23 @@ app.post("/api/documents/library", requireAuth, upload.single("file"), (req, res
 });
 
 app.delete("/api/documents/library/:id", requireAuth, (req, res) => {
-  const ok = documentLibrary.deleteLibraryDocument(req.params.id);
+  const ok = documentLibrary.deleteLibraryDocument(req.user.id, req.params.id);
   res.json({ ok });
 });
 
-app.post("/api/documents/:key", requireAuth, upload.single("file"), (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
-    if (req.file.mimetype !== "application/pdf") {
-      return res.status(400).json({ error: "Bitte eine PDF-Datei hochladen." });
-    }
-    saveUploadedDocument(req.params.key, req.file.buffer);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
+// Private media preview (used by /profile's "Ansehen" links) — photo/
+// signature are otherwise only ever embedded server-side as data: URIs
+// (digital page, PDFs), never served at a public URL.
+app.get("/api/media/mine/:key", requireAuth, (req, res) => {
+  const m = resolveMedia(req.user.id, req.params.key);
+  if (!m) return res.status(404).send("Nicht gefunden.");
+  res.set("Content-Type", m.mime).sendFile(m.path);
 });
 
 app.post("/api/media/:key", requireAuth, upload.single("file"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten." });
-    saveMedia(req.params.key, req.file.buffer, req.file.mimetype);
+    saveMedia(req.user.id, req.params.key, req.file.buffer, req.file.mimetype);
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -415,17 +493,17 @@ app.post("/api/profile", requireAuth, (req, res) => {
   if (!body || typeof body !== "object" || !body.personal || !Array.isArray(body.experience)) {
     return res.status(400).json({ error: "Ungültige Profilstruktur (personal & experience erforderlich)." });
   }
-  store.saveProfile(body);
+  store.saveProfile(req.user.id, body);
   res.json({ ok: true });
 });
 
 app.post("/api/profile/reset", requireAuth, (req, res) => {
-  store.saveProfile(DEFAULT_PROFILE);
+  store.saveProfile(req.user.id, defaultProfileFor(req.user));
   res.json({ ok: true });
 });
 
 // Gespeicherte Job-Suchen: kein automatisches Scraping/RSS (siehe lib/store.js
-// für die Begründung), nur Raffaels eigene Suchlinks als Ein-Klick-Schnellzugriff.
+// für die Begründung), nur die eigenen Suchlinks als Ein-Klick-Schnellzugriff.
 app.post("/api/searches", requireAuth, (req, res) => {
   const { label, url } = req.body || {};
   if (!label || !String(label).trim()) {
@@ -440,12 +518,12 @@ app.post("/api/searches", requireAuth, (req, res) => {
   if (!["http:", "https:"].includes(parsed.protocol)) {
     return res.status(400).json({ error: "Nur http(s)-Links sind erlaubt." });
   }
-  const entry = store.addSearch({ label: String(label).trim(), url: parsed.toString() });
+  const entry = store.addSearch(req.user.id, { label: String(label).trim(), url: parsed.toString() });
   res.json({ ok: true, entry });
 });
 
 app.delete("/api/searches/:id", requireAuth, (req, res) => {
-  const ok = store.deleteSearch(req.params.id);
+  const ok = store.deleteSearch(req.user.id, req.params.id);
   res.json({ ok });
 });
 
@@ -453,8 +531,5 @@ app.listen(PORT, () => {
   console.log(`Bewerbungs-Generator läuft auf Port ${PORT}`);
   if (!process.env.ANTHROPIC_API_KEY) {
     console.warn("WARNUNG: ANTHROPIC_API_KEY ist nicht gesetzt — Generierung wird fehlschlagen.");
-  }
-  if (!process.env.APP_PASSWORD) {
-    console.warn("Hinweis: APP_PASSWORD ist nicht gesetzt — das Tool ist ohne Login erreichbar (nur digitale Bewerbungsseiten sollen ohnehin öffentlich sein).");
   }
 });
