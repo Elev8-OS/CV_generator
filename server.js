@@ -13,7 +13,7 @@ const { fetchJobPostingText } = require("./lib/fetchJob");
 const { findDuplicateApplication } = require("./lib/dedupe");
 const { requireAuth } = require("./lib/auth");
 const { getSessionUserId, setSessionCookie, clearSessionCookie } = require("./lib/session");
-const { createUser, findUserByUsername, verifyPassword } = require("./lib/users");
+const { createUser, findUserByUsername, findUserById, verifyPassword, updateUsername, updatePassword } = require("./lib/users");
 const { migrateLegacyDataIfNeeded } = require("./lib/migrate");
 const rateLimit = require("./lib/rateLimit");
 const { renderPdfBufferFit, renderPdfBuffer } = require("./lib/pdf/printer");
@@ -253,14 +253,41 @@ app.post("/api/onboarding/cv-import", requireAuth, upload.single("file"), async 
     if (!cvText || cvText.trim().length < 30) {
       return res.status(400).json({ error: t(langFromReq(req), "cvImport.errorNoInput") });
     }
-    const extracted = await extractProfileFromCv({ cvText });
+    const extracted = await extractProfileFromCv({ cvText, uiLang: langFromReq(req) });
     const merged = mergeExtractedProfile(extracted);
     store.saveProfile(req.user.id, merged);
-    res.json({ ok: true });
+    res.json({ ok: true, issues: extracted.detectedIssues || [] });
   } catch (err) {
     console.error(err);
     const msg = err.code === "NO_API_KEY" ? err.message : err.message || t(langFromReq(req), "cvImport.errorGeneric");
     res.status(500).json({ error: msg });
+  }
+});
+
+// After a CV import surfaces detectedIssues (gaps/contradictions/missing
+// info), the client shows a short follow-up form so the user can explain (or
+// leave blank to skip) each one. Only non-empty explanations are kept —
+// skipped issues simply never become a clarification. These clarifications
+// are later woven into generateApplication's prompt (lib/ai.js
+// buildSystemPrompt / clarificationsBlock), never forced.
+app.post("/api/onboarding/cv-clarify", requireAuth, (req, res) => {
+  try {
+    const { answers } = req.body || {};
+    const profile = getProfile(req.user.id, req.user);
+    const clarifications = Array.isArray(answers)
+      ? answers
+          .filter((a) => a && String(a.explanation || "").trim())
+          .map((a) => ({
+            type: String(a.type || "sonstiges"),
+            description: String(a.description || "").slice(0, 400),
+            explanation: String(a.explanation).trim().slice(0, 800)
+          }))
+      : [];
+    profile.clarifications = [...(profile.clarifications || []), ...clarifications];
+    store.saveProfile(req.user.id, profile);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -565,6 +592,40 @@ app.post("/api/profile", requireAuth, (req, res) => {
 app.post("/api/profile/reset", requireAuth, (req, res) => {
   store.saveProfile(req.user.id, defaultProfileFor(req.user));
   res.json({ ok: true });
+});
+
+// ---------- Account settings: self-service username/password change ----------
+// Both always require re-entering the CURRENT password first, even though
+// the person is already logged in — a deliberate default for changing
+// account credentials, not something the user explicitly asked for.
+app.patch("/api/account/username", requireAuth, (req, res) => {
+  const lang = langFromReq(req);
+  const { newUsername, currentPassword } = req.body || {};
+  const fullUser = findUserById(req.user.id);
+  if (!fullUser || !verifyPassword(fullUser, currentPassword)) {
+    return res.status(401).json({ error: t(lang, "auth.wrongCurrentPassword") });
+  }
+  try {
+    const updated = updateUsername(req.user.id, newUsername, lang);
+    res.json({ ok: true, username: updated.username });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch("/api/account/password", requireAuth, (req, res) => {
+  const lang = langFromReq(req);
+  const { currentPassword, newPassword } = req.body || {};
+  const fullUser = findUserById(req.user.id);
+  if (!fullUser || !verifyPassword(fullUser, currentPassword)) {
+    return res.status(401).json({ error: t(lang, "auth.wrongCurrentPassword") });
+  }
+  try {
+    updatePassword(req.user.id, newPassword, lang);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Gespeicherte Job-Suchen: kein automatisches Scraping/RSS (siehe lib/store.js
