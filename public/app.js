@@ -16,6 +16,16 @@
     return "mailto:" + to + "?" + qs;
   }
 
+  // ---- Logout ----
+  const logoutLink = document.getElementById("logoutLink");
+  if (logoutLink) {
+    logoutLink.addEventListener("click", async (e) => {
+      e.preventDefault();
+      await fetch("/api/auth/logout", { method: "POST" });
+      window.location.href = "/login";
+    });
+  }
+
   const tabBtns = document.querySelectorAll(".tab-btn");
   const fieldText = document.getElementById("field-text");
   const fieldUrl = document.getElementById("field-url");
@@ -78,7 +88,7 @@
       document.getElementById("emailText").value =
         (data.generated.emailSubject ? "Betreff: " + data.generated.emailSubject + "\n\n" : "") +
         data.generated.emailBody +
-        "\n\nBeilagen: Lebenslauf, Motivationsschreiben, Lehrzeugnis R. Nussbaum AG, Fähigkeitszeugnis EFZ";
+        "\n\nBeilagen: Lebenslauf, Motivationsschreiben";
       document.getElementById("coverText").value = data.generated.coverLetterBody;
       document.getElementById("dlCv").href = `/pdf/${data.slug}/cv`;
       document.getElementById("dlCover").href = `/pdf/${data.slug}/cover`;
