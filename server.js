@@ -326,6 +326,9 @@ app.get("/", requireAuth, (req, res) => {
       lang: langFromReq(req),
       accentColor: profile.accentColor,
       ahvNr: profile.personal && profile.personal.ahvNr,
+      applicantName: profile.personal && profile.personal.name,
+      ravAdvisorName: profile.rav && profile.rav.advisorName,
+      ravAdvisorEmail: profile.rav && profile.rav.advisorEmail,
       currentMonthValue
     })
   );
@@ -523,8 +526,20 @@ app.get("/pdf/nachweis/:year/:month", requireAuth, async (req, res) => {
       })
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
+    // Same uploaded "signature" media used for the cover letter (lib/media.js)
+    // — embedded onto the form's signature line when present, see
+    // lib/pdf/rav.js buildRavDocDefinition for the fallback (blank line) when
+    // no signature has been uploaded yet.
+    const signature = resolveMedia(req.user.id, "signature");
     const buffer = await renderPdfBuffer(
-      buildRavDocDefinition({ personal: profile.personal, year, month, rows: applications, accentColor: profile.accentColor })
+      buildRavDocDefinition({
+        personal: profile.personal,
+        year,
+        month,
+        rows: applications,
+        signatureDataUri: signature ? signature.dataUri : null,
+        generatedAt: new Date()
+      })
     );
     res.set({
       "Content-Type": "application/pdf",
