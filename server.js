@@ -17,6 +17,7 @@ const { getSessionUserId, setSessionCookie, clearSessionCookie } = require("./li
 const { createUser, findUserByUsername, findUserById, verifyPassword, updateUsername, updatePassword } = require("./lib/users");
 const { migrateLegacyDataIfNeeded } = require("./lib/migrate");
 const rateLimit = require("./lib/rateLimit");
+const timings = require("./lib/timings");
 const { renderPdfBufferFit, renderPdfBuffer } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
@@ -259,10 +260,13 @@ app.post("/api/auth/logout", (req, res) => {
 app.get("/onboarding/cv-import", requireAuth, (req, res) => {
   const returnTo = safeNext(req.query.returnTo, "/");
   const accentColor = getProfile(req.user.id, req.user).accentColor;
-  res.set("Content-Type", "text/html; charset=utf-8").send(renderCvImportPage({ lang: langFromReq(req), returnTo, accentColor }));
+  res.set("Content-Type", "text/html; charset=utf-8").send(
+    renderCvImportPage({ lang: langFromReq(req), returnTo, accentColor, avgSeconds: timings.averageSeconds("cvImport") })
+  );
 });
 
 app.post("/api/onboarding/cv-import", requireAuth, upload.single("file"), async (req, res) => {
+  const startedAt = Date.now();
   try {
     let cvText = String((req.body && req.body.cvText) || "").trim();
     if (!cvText && req.file) {
@@ -272,6 +276,7 @@ app.post("/api/onboarding/cv-import", requireAuth, upload.single("file"), async 
       return res.status(400).json({ error: t(langFromReq(req), "cvImport.errorNoInput") });
     }
     const extracted = await extractProfileFromCv({ cvText, uiLang: langFromReq(req) });
+    timings.recordDuration("cvImport", Date.now() - startedAt);
     const merged = mergeExtractedProfile(extracted);
     store.saveProfile(req.user.id, merged);
     res.json({ ok: true, issues: extracted.detectedIssues || [] });
@@ -329,7 +334,9 @@ app.get("/", requireAuth, (req, res) => {
       applicantName: profile.personal && profile.personal.name,
       ravAdvisorName: profile.rav && profile.rav.advisorName,
       ravAdvisorEmail: profile.rav && profile.rav.advisorEmail,
-      currentMonthValue
+      currentMonthValue,
+      avgGenerateSeconds: timings.averageSeconds("generate"),
+      avgInsightsSeconds: timings.averageSeconds("insights")
     })
   );
 });
@@ -340,6 +347,12 @@ app.post("/api/generate", requireAuth, async (req, res) => {
   if (!limit.ok) {
     return res.status(429).json({ error: t(uiLang, "server.rateLimitGenerate", { limit: limit.limit }) });
   }
+  // Timed end-to-end (including the optional job-URL fetch below), not just
+  // the AI call — this is what the "dauert im Schnitt X Sekunden" hint on the
+  // dashboard's generate button actually promises the user (see
+  // lib/timings.js), i.e. the whole wait from clicking the button to the
+  // result appearing.
+  const startedAt = Date.now();
   try {
     const { jobText, jobUrl, language } = req.body || {};
     const appLang = isValidLang(language) ? language : "de";
@@ -354,6 +367,7 @@ app.post("/api/generate", requireAuth, async (req, res) => {
     const profile = getProfile(req.user.id, req.user);
     const libraryDocs = documentLibrary.listLibraryDocuments(req.user.id);
     const generated = await generateApplication({ profile, jobPostingText: text, jobUrl, libraryDocs, language: appLang });
+    timings.recordDuration("generate", Date.now() - startedAt);
 
     // Dublettenprüfung: die KI kann Firmennamen leicht unterschiedlich
     // schreiben (z.B. "Muster AG" vs. "Muster") — findDuplicateApplication
@@ -466,6 +480,7 @@ app.post("/api/applications/:slug/company-insights", requireAuth, async (req, re
   if (!limit.ok) {
     return res.status(429).json({ error: t(uiLang, "server.rateLimitInsights", { limit: limit.limit }) });
   }
+  const startedAt = Date.now();
   try {
     const insights = await generateCompanyInsights({
       company: (entry.generated && entry.generated.company) || entry.company,
@@ -473,6 +488,7 @@ app.post("/api/applications/:slug/company-insights", requireAuth, async (req, re
       jobPostingText: entry.jobPostingRaw,
       language: entry.language || "de"
     });
+    timings.recordDuration("insights", Date.now() - startedAt);
     const updated = store.saveCompanyInsights(req.user.id, entry.slug, insights);
     res.json({ ok: true, generatedAt: updated.companyInsights.generatedAt });
   } catch (err) {
