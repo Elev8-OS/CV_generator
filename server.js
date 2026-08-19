@@ -8,7 +8,7 @@ const { ensureDocuments } = require("./lib/assets");
 const documentLibrary = require("./lib/documentLibrary");
 const store = require("./lib/store");
 const { saveMedia, resolveMedia, mediaStatus } = require("./lib/media");
-const { generateApplication, extractProfileFromCv } = require("./lib/ai");
+const { generateApplication, extractProfileFromCv, extractExperienceSupplement } = require("./lib/ai");
 const { STATUSES, isValidStatus } = require("./lib/statuses");
 const { fetchJobPostingText } = require("./lib/fetchJob");
 const { findDuplicateApplication } = require("./lib/dedupe");
@@ -618,8 +618,14 @@ app.post("/api/profile", requireAuth, (req, res) => {
 // lib/profile.js mergeAdditionalExperience for the additive-only merge
 // semantics (which now also compares each extracted entry against what's
 // already on file, so re-uploading the same/overlapping positions doesn't
-// pile up duplicates). Reuses the same extraction as the first-time CV
-// import.
+// pile up duplicates). Uses extractExperienceSupplement (a narrower
+// experience+education-only schema) rather than the full-profile
+// extractProfileFromCv used by the first-time CV import: mergeAdditionalExperience
+// only ever reads extracted.experience/education anyway, and asking for
+// personal info/narrativeSummary/detectedIssues too on a dense document (e.g.
+// a LinkedIn export with a dozen-plus positions) was slow (~58s observed) and
+// left the model with a genuinely empty "experience" array despite the
+// position data being plainly present in the source text.
 app.post("/api/profile/experience/import", requireAuth, upload.single("file"), async (req, res) => {
   try {
     let cvText = String((req.body && req.body.cvText) || "").trim();
@@ -629,7 +635,7 @@ app.post("/api/profile/experience/import", requireAuth, upload.single("file"), a
     if (!cvText || cvText.trim().length < 30) {
       return res.status(400).json({ error: t(langFromReq(req), "cvImport.errorNoInput") });
     }
-    const extracted = await extractProfileFromCv({ cvText, uiLang: langFromReq(req) });
+    const extracted = await extractExperienceSupplement({ cvText, uiLang: langFromReq(req) });
     const existing = getProfile(req.user.id, req.user);
     const { profile, addedCount, skippedCount } = mergeAdditionalExperience(existing, extracted);
     store.saveProfile(req.user.id, profile);
