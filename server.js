@@ -21,6 +21,7 @@ const { renderPdfBufferFit, renderPdfBuffer } = require("./lib/pdf/printer");
 const { buildCvDocDefinition } = require("./lib/pdf/cv");
 const { buildCoverDocDefinition } = require("./lib/pdf/cover");
 const { buildInsightsDocDefinition } = require("./lib/pdf/insights");
+const { buildRavDocDefinition } = require("./lib/pdf/rav");
 const { generateCompanyInsights } = require("./lib/companyInsights");
 const { qrDataUri } = require("./lib/qr");
 const { buildApplicationEml } = require("./lib/eml");
@@ -312,6 +313,8 @@ app.post("/api/onboarding/cv-clarify", requireAuth, (req, res) => {
 app.get("/", requireAuth, (req, res) => {
   const applications = store.listApplications(req.user.id);
   const profile = getProfile(req.user.id, req.user);
+  const now = new Date();
+  const currentMonthValue = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   res.set("Content-Type", "text/html; charset=utf-8").send(
     renderIndexPage({
       applications,
@@ -321,7 +324,9 @@ app.get("/", requireAuth, (req, res) => {
       savedSearches: store.listSearches(req.user.id),
       username: req.user.username,
       lang: langFromReq(req),
-      accentColor: profile.accentColor
+      accentColor: profile.accentColor,
+      ahvNr: profile.personal && profile.personal.ahvNr,
+      currentMonthValue
     })
   );
 });
@@ -414,6 +419,25 @@ app.patch("/api/applications/:slug/note", requireAuth, (req, res) => {
   res.json({ ok: true, note: entry.note });
 });
 
+// Saves the per-application RAV fields (Zuweisung RAV, Pensum, Bewerbungsart,
+// Firmenadresse, Kontaktperson/Telefon, Absagegrund) filled in via the
+// dashboard's "RAV-Angaben" panel — see lib/store.js updateApplicationRav and
+// lib/pdf/rav.js for how these feed into the monthly RAV PDF below.
+app.patch("/api/applications/:slug/rav", requireAuth, (req, res) => {
+  const entry = store.updateApplicationRav(req.user.id, req.params.slug, req.body || {});
+  if (!entry) return res.status(404).json({ error: "Bewerbung nicht gefunden." });
+  res.json({
+    ok: true,
+    ravAssignment: entry.ravAssignment,
+    pensumType: entry.pensumType,
+    pensumPercent: entry.pensumPercent,
+    bewerbungsart: entry.bewerbungsart,
+    companyAddress: entry.companyAddress,
+    contactPhone: entry.contactPhone,
+    absagegrund: entry.absagegrund
+  });
+});
+
 // Manually take the public digital application page + PDF downloads offline
 // (e.g. once a process is finished) without deleting the application itself —
 // the private dashboard entry, its status/note history and the .eml download
@@ -468,6 +492,43 @@ app.get("/pdf/:slug/insights", requireAuth, async (req, res) => {
     res.set({
       "Content-Type": "application/pdf",
       "Content-Disposition": `inline; filename="Firmen-Insights_${companyName.replace(/\s+/g, "_")}.pdf"`
+    });
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("PDF konnte nicht erstellt werden.");
+  }
+});
+
+// Swiss RAV/ALV monthly job-search proof ("Nachweis der persönlichen
+// Arbeitsbemühungen", form 716.007) — auto-filled from this account's own
+// stored applications for the given month, see lib/pdf/rav.js. Drafts
+// ("entwurf") are excluded entirely: they were never actually sent, so they
+// have no "Datum der Bewerbung" to report. Sorted oldest-first to match how
+// someone would naturally fill the paper form in through the month.
+app.get("/pdf/nachweis/:year/:month", requireAuth, async (req, res) => {
+  const year = parseInt(req.params.year, 10);
+  const month = parseInt(req.params.month, 10);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    return res.status(400).send("Ungültiger Monat/Jahr.");
+  }
+  try {
+    const profile = getProfile(req.user.id, req.user);
+    const applications = store
+      .listApplications(req.user.id)
+      .filter((a) => a.status !== "entwurf")
+      .filter((a) => {
+        const d = new Date(a.createdAt);
+        return d.getFullYear() === year && d.getMonth() + 1 === month;
+      })
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    const buffer = await renderPdfBuffer(
+      buildRavDocDefinition({ personal: profile.personal, year, month, rows: applications, accentColor: profile.accentColor })
+    );
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="Nachweis_Arbeitsbemuehungen_${year}-${String(month).padStart(2, "0")}.pdf"`
     });
     res.send(buffer);
   } catch (err) {
