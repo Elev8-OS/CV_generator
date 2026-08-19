@@ -366,14 +366,55 @@
   });
 
   // ---- RAV-Nachweis PDF (Monat/Jahr) ----
+  const ravMonthLocale = { de: "de-CH", fr: "fr-CH", en: "en-US" }[APP_LANG] || "de-CH";
+  function ravFilenameFor(year, month) {
+    return `Nachweis_Arbeitsbemuehungen_${year}-${String(month).padStart(2, "0")}.pdf`;
+  }
+  function ravSelectedYearMonth() {
+    const monthInput = document.getElementById("ravMonth");
+    const value = monthInput && monthInput.value; // "YYYY-MM"
+    if (!value) return null;
+    const [year, month] = value.split("-").map((n) => parseInt(n, 10));
+    return { year, month };
+  }
+
   const ravDownloadBtn = document.getElementById("ravDownloadBtn");
   if (ravDownloadBtn) {
     ravDownloadBtn.addEventListener("click", () => {
-      const monthInput = document.getElementById("ravMonth");
-      const value = monthInput && monthInput.value; // "YYYY-MM"
-      if (!value) return;
-      const [year, month] = value.split("-");
-      window.open(`/pdf/nachweis/${year}/${parseInt(month, 10)}`, "_blank");
+      const ym = ravSelectedYearMonth();
+      if (!ym) return;
+      window.open(`/pdf/nachweis/${ym.year}/${ym.month}`, "_blank");
+    });
+  }
+
+  // "An Berater:in senden": since a mailto: link can never carry a real file
+  // attachment (see the .eml route above for why that route exists instead
+  // for the regular application emails), this opens the PDF download AND a
+  // prefilled mailto: side by side — the person still has to attach the
+  // just-downloaded PDF themselves in their mail client.
+  const ravSendBtn = document.getElementById("ravSendBtn");
+  if (ravSendBtn) {
+    ravSendBtn.addEventListener("click", () => {
+      const ym = ravSelectedYearMonth();
+      if (!ym) return;
+      const monthLabel = new Date(ym.year, ym.month - 1, 1).toLocaleDateString(ravMonthLocale, { month: "long", year: "numeric" });
+      const filename = ravFilenameFor(ym.year, ym.month);
+      const advisorName = I18N.ravAdvisorName || "";
+      const applicantName = I18N.applicantName || "";
+      const greeting = advisorName
+        ? (I18N.ravMailtoGreetingWithName || "%NAME%").replace("%NAME%", advisorName)
+        : I18N.ravMailtoGreetingGeneric || "";
+      const subject = (I18N.ravMailtoSubjectTemplate || "%MONTH%").replace("%MONTH%", monthLabel).replace("%NAME%", applicantName);
+      const body =
+        greeting +
+        "\n\n" +
+        (I18N.ravMailtoBodyTemplate || "").replace("%MONTH%", monthLabel).replace("%FILENAME%", filename) +
+        "\n\n" +
+        (I18N.ravMailtoClosing || "") +
+        "\n" +
+        applicantName;
+      window.open(`/pdf/nachweis/${ym.year}/${ym.month}`, "_blank");
+      window.location.href = `mailto:${(I18N.ravAdvisorEmail || "").trim()}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     });
   }
 })();
