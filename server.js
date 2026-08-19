@@ -635,7 +635,16 @@ app.post("/api/profile/experience/import", requireAuth, upload.single("file"), a
     if (!cvText || cvText.trim().length < 30) {
       return res.status(400).json({ error: t(langFromReq(req), "cvImport.errorNoInput") });
     }
+    // TEMP DIAGNOSTIC LOGGING: two consecutive real-world attempts came back
+    // with a genuinely empty experience array (200 OK, ~40s, no thrown error)
+    // even after narrowing the extraction schema to experience+education
+    // only — that ruled out "the model has too much unrelated work to do" as
+    // the cause. Logging the actual extracted cvText length/preview and the
+    // raw extraction result here to see concretely what's happening before
+    // guessing further. Safe to remove once this is root-caused.
+    console.log(`[experience-import] cvText length=${cvText.length}, preview="${cvText.slice(0, 200).replace(/\n/g, " | ")}"`);
     const extracted = await extractExperienceSupplement({ cvText, uiLang: langFromReq(req) });
+    console.log(`[experience-import] extracted.experience count=${Array.isArray(extracted.experience) ? extracted.experience.length : "NOT AN ARRAY"}, raw=${JSON.stringify(extracted).slice(0, 2000)}`);
     const existing = getProfile(req.user.id, req.user);
     const { profile, addedCount, skippedCount } = mergeAdditionalExperience(existing, extracted);
     store.saveProfile(req.user.id, profile);
