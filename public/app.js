@@ -308,6 +308,9 @@
   const statusFilter = document.getElementById("statusFilter");
   if (statusFilter) {
     statusFilter.addEventListener("change", () => {
+      // Close any open RAV panel first -- otherwise one can be left visible
+      // hanging below a row the filter just hid.
+      document.querySelectorAll(".rav-panel-row.rav-open").forEach((tr) => tr.classList.remove("rav-open"));
       const wanted = statusFilter.value;
       const rows = document.querySelectorAll("#appTableBody tr[data-row]");
       let visibleCount = 0;
@@ -318,6 +321,59 @@
       });
       const emptyMsg = document.getElementById("filterEmpty");
       if (emptyMsg) emptyMsg.style.display = rows.length && !visibleCount ? "block" : "none";
+    });
+  }
+
+  // ---- RAV-Angaben pro Bewerbung (Nachweis der persönlichen Arbeitsbemühungen) ----
+  // Toggle: show/hide the hidden panel row injected right below each
+  // application row (see lib/pages/indexPage.js ravPanelRow).
+  document.querySelectorAll("[data-rav-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const slug = btn.dataset.ravToggle;
+      const panel = document.querySelector(`[data-rav-panel="${slug}"]`);
+      if (panel) panel.classList.toggle("rav-open");
+    });
+  });
+
+  document.querySelectorAll("[data-rav-save]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const slug = btn.dataset.ravSave;
+      const panel = document.querySelector(`[data-rav-panel="${slug}"]`);
+      if (!panel) return;
+      const statusEl = panel.querySelector(`[data-rav-status="${slug}"]`);
+      const body = {
+        ravAssignment: panel.querySelector(`[data-rav-assignment="${slug}"]`).checked,
+        pensumType: panel.querySelector(`[data-rav-pensum-type="${slug}"]`).value,
+        pensumPercent: panel.querySelector(`[data-rav-pensum-percent="${slug}"]`).value,
+        bewerbungsart: panel.querySelector(`[data-rav-art="${slug}"]`).value,
+        companyAddress: panel.querySelector(`[data-rav-address="${slug}"]`).value,
+        contactPhone: panel.querySelector(`[data-rav-phone="${slug}"]`).value,
+        absagegrund: panel.querySelector(`[data-rav-reason="${slug}"]`).value
+      };
+      if (statusEl) { statusEl.textContent = "…"; statusEl.className = "status"; }
+      try {
+        const res = await fetch(`/api/applications/${slug}/rav`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        if (!res.ok) throw new Error();
+        if (statusEl) { statusEl.textContent = I18N.ravSaveOk || "Gespeichert ✓"; statusEl.className = "status ok"; }
+      } catch {
+        if (statusEl) { statusEl.textContent = I18N.ravSaveError || "Konnte nicht gespeichert werden."; statusEl.className = "status err"; }
+      }
+    });
+  });
+
+  // ---- RAV-Nachweis PDF (Monat/Jahr) ----
+  const ravDownloadBtn = document.getElementById("ravDownloadBtn");
+  if (ravDownloadBtn) {
+    ravDownloadBtn.addEventListener("click", () => {
+      const monthInput = document.getElementById("ravMonth");
+      const value = monthInput && monthInput.value; // "YYYY-MM"
+      if (!value) return;
+      const [year, month] = value.split("-");
+      window.open(`/pdf/nachweis/${year}/${parseInt(month, 10)}`, "_blank");
     });
   }
 })();
