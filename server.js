@@ -616,7 +616,10 @@ app.post("/api/profile", requireAuth, (req, res) => {
 // positions from a supplementary document (or just a pasted text block)
 // WITHOUT overwriting anything already in their profile — see
 // lib/profile.js mergeAdditionalExperience for the additive-only merge
-// semantics. Reuses the same extraction as the first-time CV import.
+// semantics (which now also compares each extracted entry against what's
+// already on file, so re-uploading the same/overlapping positions doesn't
+// pile up duplicates). Reuses the same extraction as the first-time CV
+// import.
 app.post("/api/profile/experience/import", requireAuth, upload.single("file"), async (req, res) => {
   try {
     let cvText = String((req.body && req.body.cvText) || "").trim();
@@ -628,12 +631,12 @@ app.post("/api/profile/experience/import", requireAuth, upload.single("file"), a
     }
     const extracted = await extractProfileFromCv({ cvText, uiLang: langFromReq(req) });
     const existing = getProfile(req.user.id, req.user);
-    const { profile, addedCount } = mergeAdditionalExperience(existing, extracted);
+    const { profile, addedCount, skippedCount } = mergeAdditionalExperience(existing, extracted);
     store.saveProfile(req.user.id, profile);
-    res.json({ ok: true, addedCount });
+    res.json({ ok: true, addedCount, skippedCount });
   } catch (err) {
     console.error(err);
-    const msg = err.code === "NO_API_KEY" ? err.message : err.message || t(langFromReq(req), "cvImport.errorGeneric");
+    const msg = err.code === "NO_API_KEY" || err.code === "TRUNCATED" ? err.message : err.message || t(langFromReq(req), "cvImport.errorGeneric");
     res.status(500).json({ error: msg });
   }
 });
